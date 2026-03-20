@@ -169,11 +169,11 @@ export default function App() {
         const Dialog = new MyDialog(gameName, gameData);
         if (gameName.endsWith('.ulx') || gameName.endsWith('.gblorb')) {
           vm = await Git({
-            locateFile: () => gitWasm
+            locateFile: (path: string) => path.endsWith('.wasm') ? new URL(gitWasm, window.location.href).href : path
           });
         } else {
           vm = await Bocfel({
-            locateFile: () => bocfelWasm
+            locateFile: (path: string) => path.endsWith('.wasm') ? new URL(bocfelWasm, window.location.href).href : path
           });
         }
         
