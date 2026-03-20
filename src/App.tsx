@@ -66,7 +66,7 @@ export default function App() {
       const exists = await localforage.getItem('minizork.z3');
       if (!exists) {
         try {
-          const res = await fetch('/minizork.z3');
+          const res = await fetch(`${import.meta.env.BASE_URL}minizork.z3`);
           const buffer = await res.arrayBuffer();
           await localforage.setItem('minizork.z3', new Uint8Array(buffer));
           refreshLocalGames();
@@ -695,6 +695,3 @@ export default function App() {
     </div>
   );
 }
-
-
-
