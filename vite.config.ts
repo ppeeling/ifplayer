@@ -36,6 +36,18 @@ export default defineConfig(({mode}) => {
     define: {
       'process.env.GEMINI_API_KEY': 'process.env.GEMINI_API_KEY',
     },
+    build: {
+      rollupOptions: {
+        output: {
+          assetFileNames: (assetInfo) => {
+            if (assetInfo.name && assetInfo.name.endsWith('.wasm')) {
+              return 'assets/[name][extname]';
+            }
+            return 'assets/[name]-[hash][extname]';
+          },
+        },
+      },
+    },
     optimizeDeps: {
       exclude: ['emglken']
     },
