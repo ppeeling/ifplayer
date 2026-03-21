@@ -5,8 +5,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Bocfel, Git } from 'emglken';
-import bocfelWasm from 'emglken/build/bocfel.wasm?url';
-import gitWasm from 'emglken/build/git.wasm?url';
 import { MyDialog } from './MyDialog';
 import { useGlkOte } from './useGlkOte';
 import { useAI } from './useAI';
@@ -168,13 +166,9 @@ export default function App() {
       try {
         const Dialog = new MyDialog(gameName, gameData);
         if (gameName.endsWith('.ulx') || gameName.endsWith('.gblorb')) {
-          vm = await Git({
-            locateFile: (path: string) => path.endsWith('.wasm') ? new URL(gitWasm, window.location.href).href : path
-          });
+          vm = await Git();
         } else {
-          vm = await Bocfel({
-            locateFile: (path: string) => path.endsWith('.wasm') ? new URL(bocfelWasm, window.location.href).href : path
-          });
+          vm = await Bocfel();
         }
         
         vm.start({
