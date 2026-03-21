@@ -3,13 +3,25 @@ import { GoogleGenAI, Type } from '@google/genai';
 
 export function useAI() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [hintAnswer, setHintAnswer] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const getSuggestions = useCallback(async (history: string[], currentOutput: string, model: string = 'gemini-3-flash-preview') => {
+  const getSuggestions = useCallback(async (
+    mode: 'command' | 'hint',
+    question: string,
+    history: string[], 
+    currentOutput: string, 
+    gameName: string = '', 
+    gameType: string = '', 
+    relevantStrings: string[] = [], 
+    model: string = 'gemini-3-flash-preview',
+    settings: { contextWindowSize: number, historyLength: number, relevantStringsCount: number } = { contextWindowSize: 10000, historyLength: 15, relevantStringsCount: 20 }
+  ) => {
     if (!currentOutput.trim()) return;
     setLoading(true);
     setError(null);
+    if (mode === 'hint') setHintAnswer(null);
     try {
       // Check localStorage first, then process.env
       let apiKey = localStorage.getItem('GEMINI_API_KEY_OVERRIDE') || process.env.GEMINI_API_KEY;
@@ -29,49 +41,102 @@ export function useAI() {
       
       const ai = new GoogleGenAI({ apiKey });
 
-      // Limit output to last 2000 characters to prevent prompt overflow
-      const truncatedOutput = currentOutput.length > 2000 ? currentOutput.slice(-2000) : currentOutput;
+      // Use user-defined context window size
+      const truncatedOutput = currentOutput.length > settings.contextWindowSize ? currentOutput.slice(-settings.contextWindowSize) : currentOutput;
       
-      const prompt = `You are an AI assistant playing an interactive fiction game.
-Based on the game's recent output and the history of commands, suggest 7 short, concise commands the player could try next.
-Return ONLY a JSON array of strings.
+      let prompt = '';
+      let config: any = {};
 
-Recent history:
-${history.slice(-5).join('\n')}
+      if (mode === 'command') {
+        prompt = `You are an expert AI assistant playing an interactive fiction game.
+Your goal is to provide 7 helpful, concise command suggestions for the player.
 
-Current output:
-${truncatedOutput}`;
+Game Info:
+- Name: ${gameName || 'Unknown'}
+- Type: ${gameType || 'Interactive Fiction'}
 
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: prompt,
-        config: {
+Context:
+- Analyze the "Current output" for objects, room descriptions, exits, and narrative clues.
+- Review the "Recent history" to avoid repeating failed actions and to understand the current quest.
+- Use the "Relevant Game Strings" (extracted from the binary) to find potential commands, object names, or narrative hints.
+- Suggestions should be short (1-4 words) and relevant to the current situation.
+
+Recent history (last ${settings.historyLength} commands):
+${history.slice(-settings.historyLength).join('\n')}
+
+Current output (last ${settings.contextWindowSize} characters):
+${truncatedOutput}
+
+Relevant Game Strings (Hints):
+${relevantStrings.length > 0 ? relevantStrings.slice(0, settings.relevantStringsCount).join('\n') : 'None available.'}
+
+Return ONLY a JSON array of 7 strings.`;
+
+        config = {
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.ARRAY,
             items: { type: Type.STRING }
           }
-        }
+        };
+      } else {
+        // Hint mode
+        prompt = `You are an expert AI assistant playing an interactive fiction game.
+The player is asking for a hint or asking a question about the game.
+
+Game Info:
+- Name: ${gameName || 'Unknown'}
+- Type: ${gameType || 'Interactive Fiction'}
+
+User Question:
+"${question}"
+
+Context:
+- Analyze the "Current output" for objects, room descriptions, exits, and narrative clues.
+- Review the "Recent history" to understand what the player has tried.
+- Use the "Relevant Game Strings" (extracted from the binary) to find potential clues, hidden objects, or narrative hints that might answer the question.
+- Provide a helpful, concise answer. Do not give away the entire solution unless explicitly asked, but be helpful.
+
+Recent history (last ${settings.historyLength} commands):
+${history.slice(-settings.historyLength).join('\n')}
+
+Current output (last ${settings.contextWindowSize} characters):
+${truncatedOutput}
+
+Relevant Game Strings (Hints):
+${relevantStrings.length > 0 ? relevantStrings.slice(0, settings.relevantStringsCount).join('\n') : 'None available.'}
+
+Return a helpful, concise answer in plain text.`;
+      }
+
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: prompt,
+        config: config
       });
       
       const text = response.text;
       if (text) {
-        setSuggestions(JSON.parse(text));
+        if (mode === 'command') {
+          setSuggestions(JSON.parse(text));
+        } else {
+          setHintAnswer(text);
+        }
       } else {
-        setError('No suggestions returned from AI.');
+        setError('No response returned from AI.');
       }
     } catch (err: any) {
-      console.error('Failed to get suggestions:', err);
+      console.error('Failed to get AI response:', err);
       // More descriptive error for common issues
       if (err?.message?.includes('fetch')) {
         setError('Network error: The AI request was blocked or failed. Check your internet or browser settings.');
       } else {
-        setError(err?.message || 'Failed to get suggestions. Check your connection.');
+        setError(err?.message || 'Failed to get AI response. Check your connection.');
       }
     } finally {
       setLoading(false);
     }
   }, []);
 
-  return { suggestions, loading, error, getSuggestions, setSuggestions };
+  return { suggestions, hintAnswer, loading, error, getSuggestions, setSuggestions, setHintAnswer };
 }
