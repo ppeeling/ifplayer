@@ -13,14 +13,23 @@ import { useAI } from './useAI';
 import { useGoogleDrive } from './useGoogleDrive';
 import { Loader2, Sparkles, Folder, Download, Play, LogIn, LogOut, RefreshCw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react';
 import localforage from 'localforage';
+import { extractStrings, findRelevantStrings } from './services/stringExtractor';
 
 export default function App() {
   const { GlkOte, sendEvent, windows, windowBuffers, inputs, clearState, filePrompt, submitFilePrompt } = useGlkOte();
-  const { suggestions, loading: aiLoading, error: aiError, getSuggestions, setSuggestions } = useAI();
+  const { suggestions, hintAnswer, loading: aiLoading, error: aiError, getSuggestions, setSuggestions, setHintAnswer } = useAI();
   const { login, logout, accessToken, listFiles, downloadFile, uploadFile, loading: driveLoading } = useGoogleDrive();
   
   const [gameData, setGameData] = useState<Uint8Array | null>(null);
   const [gameName, setGameName] = useState<string>('');
+  const [gameStrings, setGameStrings] = useState<string[]>([]);
+  const [aiMode, setAiMode] = useState<'command' | 'hint'>('command');
+  const [hintQuestion, setHintQuestion] = useState('');
+  const [aiSettings, setAiSettings] = useState({
+    contextWindowSize: 10000,
+    historyLength: 15,
+    relevantStringsCount: 20
+  });
   const [inputValue, setInputValue] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
   const [history, setHistory] = useState<string[]>([]);
@@ -100,6 +109,7 @@ export default function App() {
       clearState();
       setGameName(name);
       setGameData(data);
+      setGameStrings(extractStrings(data));
       setShowSidebar(false);
     }
   };
@@ -116,6 +126,7 @@ export default function App() {
     const buffer = await file.arrayBuffer();
     const data = new Uint8Array(buffer);
     await localforage.setItem(file.name, data);
+    setGameStrings(extractStrings(data));
     refreshLocalGames();
     loadLocalGame(file.name);
     
@@ -268,17 +279,28 @@ export default function App() {
     }, 100);
   };
 
+  const getGameType = () => {
+    if (!gameName) return '';
+    if (gameName.endsWith('.ulx') || gameName.endsWith('.gblorb')) return 'Glulx';
+    if (gameName.match(/\.z\d$/i)) return 'Z-machine';
+    return 'Interactive Fiction';
+  };
+
   useEffect(() => {
     if (autoSuggest && inputs.length > 0 && inputs[0].type === 'line' && currentOutput) {
       if (lastSuggestedTurn.current !== history.length) {
         lastSuggestedTurn.current = history.length;
-        getSuggestions(history, currentOutput, selectedModel);
+        const relevant = findRelevantStrings(gameStrings, currentOutput);
+        console.log(`Top ${aiSettings.relevantStringsCount} relevant strings:`, relevant.slice(0, aiSettings.relevantStringsCount));
+        getSuggestions('command', '', history, currentOutput, gameName, getGameType(), relevant, selectedModel, aiSettings);
       }
     }
-  }, [inputs, currentOutput, autoSuggest, history.length, getSuggestions, selectedModel]);
+  }, [inputs, currentOutput, autoSuggest, history.length, getSuggestions, selectedModel, gameName, gameStrings, aiSettings]);
 
   const handleSuggest = () => {
-    getSuggestions(history, currentOutput, selectedModel);
+    const relevant = findRelevantStrings(gameStrings, currentOutput);
+    console.log(`Top ${aiSettings.relevantStringsCount} relevant strings:`, relevant.slice(0, aiSettings.relevantStringsCount));
+    getSuggestions(aiMode, hintQuestion, history, currentOutput, gameName, getGameType(), relevant, selectedModel, aiSettings);
   };
 
   const clearAppCache = async () => {
@@ -488,7 +510,40 @@ export default function App() {
                   <p className="text-[10px] text-gray-500 mt-1">Only use this if the platform settings (gear icon) don't work on your device.</p>
                 </div>
                 
-                <div className="pt-2">
+                <div className="pt-2 space-y-4">
+                  <div className="border-t border-gray-200 dark:border-gray-700 pt-4">
+                    <p className="text-[10px] font-bold text-gray-400 uppercase mb-2">Advanced AI Context</p>
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-1">Context Window ({aiSettings.contextWindowSize} chars)</label>
+                        <input 
+                          type="range" min="1000" max="20000" step="1000"
+                          value={aiSettings.contextWindowSize}
+                          onChange={(e) => setAiSettings({...aiSettings, contextWindowSize: parseInt(e.target.value)})}
+                          className="w-full h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-1">History Length ({aiSettings.historyLength} commands)</label>
+                        <input 
+                          type="range" min="1" max="50" step="1"
+                          value={aiSettings.historyLength}
+                          onChange={(e) => setAiSettings({...aiSettings, historyLength: parseInt(e.target.value)})}
+                          className="w-full h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-gray-500 mb-1">Relevant Strings ({aiSettings.relevantStringsCount})</label>
+                        <input 
+                          type="range" min="0" max="100" step="5"
+                          value={aiSettings.relevantStringsCount}
+                          onChange={(e) => setAiSettings({...aiSettings, relevantStringsCount: parseInt(e.target.value)})}
+                          className="w-full h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
                   <button 
                     onClick={() => setShowDebug(!showDebug)}
                     className="text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
@@ -549,7 +604,9 @@ export default function App() {
                 setAutoSuggest(!autoSuggest);
                 if (!autoSuggest && inputs.length > 0 && inputs[0].type === 'line' && currentOutput) {
                   lastSuggestedTurn.current = history.length;
-                  getSuggestions(history, currentOutput, selectedModel);
+                  const relevant = findRelevantStrings(gameStrings, currentOutput);
+                  console.log(`Top ${aiSettings.relevantStringsCount} relevant strings:`, relevant.slice(0, aiSettings.relevantStringsCount));
+                  getSuggestions('command', '', history, currentOutput, gameName, getGameType(), relevant, selectedModel, aiSettings);
                 }
               }}
               className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg transition-colors shadow-sm shrink-0 ${autoSuggest ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
@@ -560,16 +617,50 @@ export default function App() {
             </button>
             <button 
               onClick={handleSuggest}
-              disabled={aiLoading || !gameData}
+              disabled={aiLoading || !gameData || (aiMode === 'hint' && !hintQuestion.trim())}
               className="flex items-center gap-2 bg-indigo-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 shadow-sm shrink-0"
             >
               {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              <span className="hidden sm:inline">Suggest</span>
+              <span className="hidden sm:inline">{aiMode === 'command' ? 'Suggest' : 'Ask'}</span>
             </button>
           </div>
         </div>
         
-        <div className="flex-1 border border-gray-300 dark:border-gray-700 rounded-xl p-4 overflow-y-auto font-mono whitespace-pre-wrap bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 shadow-sm flex flex-col min-h-0">
+        {/* AI Mode Toggle & Hint Input */}
+        {gameData && (
+          <div className="mb-4 flex flex-col sm:flex-row gap-3 items-center bg-white dark:bg-gray-800 p-3 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
+            <div className="flex bg-gray-100 dark:bg-gray-900 p-1 rounded-lg shrink-0">
+              <button
+                onClick={() => setAiMode('command')}
+                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${aiMode === 'command' ? 'bg-white dark:bg-gray-700 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+              >
+                Command Mode
+              </button>
+              <button
+                onClick={() => setAiMode('hint')}
+                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${aiMode === 'hint' ? 'bg-white dark:bg-gray-700 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
+              >
+                Hint Mode
+              </button>
+            </div>
+            {aiMode === 'hint' && (
+              <input
+                type="text"
+                placeholder="Ask a question about the game..."
+                value={hintQuestion}
+                onChange={(e) => setHintQuestion(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && hintQuestion.trim()) {
+                    handleSuggest();
+                  }
+                }}
+                className="flex-1 w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            )}
+          </div>
+        )}
+
+        <div className="flex-1 border border-gray-300 dark:border-gray-700 rounded-xl p-4 overflow-y-auto font-mono whitespace-pre-wrap bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 shadow-sm flex flex-col min-h-0 relative">
           {!gameData ? (
             <div className="flex-1 flex flex-col items-center justify-center text-gray-500 dark:text-gray-400">
               <Folder className="w-12 h-12 mb-4 text-gray-300 dark:text-gray-600" />
@@ -591,7 +682,7 @@ export default function App() {
           )}
         </div>
 
-        {(autoSuggest || suggestions.length > 0 || aiError) && (
+        {(autoSuggest || suggestions.length > 0 || hintAnswer || aiError) && (
           <div className="mt-3 flex gap-2 overflow-x-auto pb-2 no-scrollbar shrink-0 min-h-[48px] items-center relative z-10">
             {aiError ? (
               <div className="text-xs text-red-500 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg flex items-center gap-2">
@@ -603,6 +694,17 @@ export default function App() {
                 >
                   Retry
                 </button>
+              </div>
+            ) : hintAnswer ? (
+              <div className="w-full text-sm text-indigo-900 dark:text-indigo-100 bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-200 dark:border-indigo-800 p-3 rounded-lg relative">
+                <button 
+                  onClick={() => setHintAnswer(null)}
+                  className="absolute top-2 right-2 text-indigo-400 hover:text-indigo-600 dark:hover:text-indigo-200"
+                >
+                  ✕
+                </button>
+                <div className="font-bold mb-1 flex items-center gap-2"><Sparkles className="w-4 h-4"/> Hint</div>
+                <div className="whitespace-pre-wrap">{hintAnswer}</div>
               </div>
             ) : suggestions.length > 0 ? (
               suggestions.map((sug, i) => (
