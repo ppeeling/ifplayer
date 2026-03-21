@@ -263,7 +263,9 @@ export default function App() {
       });
       setHistory(prev => [...prev, cmd]);
       setInputValue('');
-      setSuggestions([]);
+      if (!autoSuggest) {
+        setSuggestions([]);
+      }
     } else if (inputReq.type === 'char') {
       sendEvent({
         type: 'char',
@@ -682,7 +684,7 @@ export default function App() {
           )}
         </div>
 
-        {(autoSuggest || suggestions.length > 0 || hintAnswer || aiError) && (
+        {(autoSuggest || aiLoading || suggestions.length > 0 || hintAnswer || aiError) && (
           <div className="mt-3 flex gap-2 overflow-x-auto pb-2 no-scrollbar shrink-0 min-h-[48px] items-center relative z-10">
             {aiError ? (
               <div className="text-xs text-red-500 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg flex items-center gap-2">
@@ -706,22 +708,25 @@ export default function App() {
                 <div className="font-bold mb-1 flex items-center gap-2"><Sparkles className="w-4 h-4"/> Hint</div>
                 <div className="whitespace-pre-wrap">{hintAnswer}</div>
               </div>
-            ) : suggestions.length > 0 ? (
-              suggestions.map((sug, i) => (
-                <button
-                  key={i}
-                  onClick={() => submitCommand(sug)}
-                  className="bg-white dark:bg-gray-800 border border-indigo-200 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 px-4 py-2 rounded-full text-sm hover:bg-indigo-50 dark:hover:bg-gray-700 transition-colors shadow-sm whitespace-nowrap shrink-0 active:scale-95 touch-manipulation"
-                >
-                  {sug}
-                </button>
-              ))
-            ) : autoSuggest && aiLoading ? (
-              <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 italic px-2">
-                <Loader2 className="w-4 h-4 animate-spin" />
-                Generating suggestions...
-              </div>
-            ) : null}
+            ) : (
+              <>
+                {suggestions.map((sug, i) => (
+                  <button
+                    key={i}
+                    onClick={() => submitCommand(sug)}
+                    className="bg-white dark:bg-gray-800 border border-indigo-200 dark:border-indigo-700 text-indigo-700 dark:text-indigo-300 px-4 py-2 rounded-full text-sm hover:bg-indigo-50 dark:hover:bg-gray-700 transition-colors shadow-sm whitespace-nowrap shrink-0 active:scale-95 touch-manipulation"
+                  >
+                    {sug}
+                  </button>
+                ))}
+                {aiLoading && (
+                  <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 italic px-2 shrink-0">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Generating suggestions...
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
 
