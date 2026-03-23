@@ -347,6 +347,18 @@ export default function App() {
     }
   }, [inputs, currentOutput, autoSuggest, history.length, getSuggestions, selectedModel, gameName, gameStrings, aiSettings]);
 
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (inputs.length > 0 && inputs[0].type === 'char' && !isReplaying) {
+        e.preventDefault();
+        submitCommand('return');
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [inputs, isReplaying]);
+
   const handleSuggest = () => {
     const relevant = findRelevantStrings(gameStrings, currentOutput);
     console.log(`Top ${aiSettings.relevantStringsCount} relevant strings:`, relevant.slice(0, aiSettings.relevantStringsCount));
@@ -741,7 +753,7 @@ export default function App() {
         </div>
 
         {(aiLoading || hintAnswer || aiError) && (
-          <div className="mt-3 flex gap-2 overflow-x-auto pb-2 no-scrollbar shrink-0 min-h-[48px] items-center relative z-10">
+          <div className={`mt-3 gap-2 overflow-x-auto pb-2 no-scrollbar shrink-0 min-h-[48px] items-center relative z-10 ${!hintAnswer && !aiError ? 'hidden sm:flex' : 'flex'}`}>
             {aiError ? (
               <div className="text-xs text-red-500 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg flex items-center gap-2">
                 <span className="font-bold shrink-0">AI Error:</span>
@@ -832,6 +844,17 @@ export default function App() {
                 ↵
               </button>
             </div>
+          </div>
+        )}
+
+        {gameData && inputs.length > 0 && inputs[0].type === 'char' && !isReplaying && (
+          <div className="flex items-center mt-2 mb-4 p-3 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl shadow-sm shrink-0">
+            <button
+              onClick={() => submitCommand('return')}
+              className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-lg transition-colors animate-pulse"
+            >
+              Press any key or tap to continue...
+            </button>
           </div>
         )}
       </div>
