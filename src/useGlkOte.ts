@@ -4,7 +4,7 @@ export function useGlkOte() {
   const [windows, setWindows] = useState<any[]>([]);
   const [inputs, setInputs] = useState<any[]>([]);
   const [windowBuffers, setWindowBuffers] = useState<Record<number, any[]>>({});
-  const [filePrompt, setFilePrompt] = useState<{ type: string, filetype: string } | null>(null);
+  const [filePrompt, setFilePrompt] = useState<{ type: string, filetype: string, filemode?: string } | null>(null);
   const acceptFuncRef = useRef<any>(null);
   const genRef = useRef<number>(0);
 
@@ -99,7 +99,7 @@ export function useGlkOte() {
 
       if (data.specialinput) {
         if (data.specialinput.type === 'fileref_prompt') {
-          setFilePrompt({ type: data.specialinput.type, filetype: data.specialinput.filetype });
+          setFilePrompt({ type: data.specialinput.type, filetype: data.specialinput.filetype, filemode: data.specialinput.filemode });
         }
       }
     }

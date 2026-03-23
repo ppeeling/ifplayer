@@ -11,14 +11,14 @@ import { MyDialog } from './MyDialog';
 import { useGlkOte } from './useGlkOte';
 import { useAI } from './useAI';
 import { useGoogleDrive } from './useGoogleDrive';
-import { Loader2, Sparkles, Folder, Download, Play, LogIn, LogOut, RefreshCw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react';
+import { Loader2, Sparkles, Folder, Download, Play, LogIn, LogOut, RefreshCw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
 import localforage from 'localforage';
 import { extractStrings, findRelevantStrings } from './services/stringExtractor';
 
 export default function App() {
   const { GlkOte, sendEvent, windows, windowBuffers, inputs, clearState, filePrompt, submitFilePrompt } = useGlkOte();
   const { suggestions, hintAnswer, loading: aiLoading, error: aiError, getSuggestions, setSuggestions, setHintAnswer } = useAI();
-  const { login, logout, accessToken, listFiles, downloadFile, uploadFile, loading: driveLoading } = useGoogleDrive();
+  const { login, logout, accessToken, listFiles, downloadFile, uploadFile, deleteFile, loading: driveLoading } = useGoogleDrive();
   
   const [gameData, setGameData] = useState<Uint8Array | null>(null);
   const [gameName, setGameName] = useState<string>('');
@@ -49,6 +49,8 @@ export default function App() {
   const [isSyncing, setIsSyncing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastSuggestedTurn = useRef(-1);
+  const [replayQueue, setReplayQueue] = useState<string[]>([]);
+  const [isReplaying, setIsReplaying] = useState(false);
 
   useEffect(() => {
     // Check local storage for dark mode preference
@@ -93,7 +95,7 @@ export default function App() {
     const keys = await localforage.keys();
     // Filter out save files (assuming games end with .z3, .z5, .z8, .ulx, .gblorb)
     const games = keys.filter(k => k.match(/\.(z\d|ulx|gblorb)$/i));
-    const saves = keys.filter(k => !k.match(/\.(z\d|ulx|gblorb)$/i));
+    const saves = keys.filter(k => !k.match(/\.(z\d|ulx|gblorb)$/i) && !k.startsWith('autosave_'));
     setLocalGames(games);
     setLocalSaves(saves);
     
@@ -111,11 +113,22 @@ export default function App() {
       setGameData(data);
       setGameStrings(extractStrings(data));
       setShowSidebar(false);
+      
+      const autosave = await localforage.getItem<string[]>(`autosave_${name}`);
+      if (autosave && autosave.length > 0) {
+        // Auto-restore without asking
+        setReplayQueue(autosave);
+        setIsReplaying(true);
+        setHistory(autosave);
+      } else {
+        setHistory([]);
+      }
     }
   };
 
   const deleteLocalFile = async (name: string) => {
     await localforage.removeItem(name);
+    await localforage.removeItem(`autosave_${name}`);
     refreshLocalGames();
   };
 
@@ -147,6 +160,13 @@ export default function App() {
     if (data) {
       await localforage.setItem(file.name, data);
       refreshLocalGames();
+    }
+  };
+
+  const deleteFromDrive = async (file: any) => {
+    if (window.confirm(`Are you sure you want to delete ${file.name} from Google Drive?`)) {
+      await deleteFile(file.id);
+      handleDriveSync();
     }
   };
 
@@ -261,7 +281,16 @@ export default function App() {
         window: inputReq.id,
         value: cmd
       });
-      setHistory(prev => [...prev, cmd]);
+      const newHistory = [...history, cmd];
+      setHistory(newHistory);
+      
+      const lowerCmd = cmd.toLowerCase().trim();
+      if (['restart', 'restore', 'quit'].includes(lowerCmd)) {
+        localforage.removeItem(`autosave_${gameName}`);
+      } else if (lowerCmd !== 'save') {
+        localforage.setItem(`autosave_${gameName}`, newHistory.filter(c => !['save', 'restore', 'restart', 'quit'].includes(c.toLowerCase().trim())));
+      }
+
       setInputValue('');
       if (!autoSuggest) {
         setSuggestions([]);
@@ -280,6 +309,31 @@ export default function App() {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, 100);
   };
+
+  useEffect(() => {
+    if (isReplaying && inputs.length > 0) {
+      if (inputs[0].type === 'char') {
+        sendEvent({
+          type: 'char',
+          window: inputs[0].id,
+          value: 'return'
+        });
+      } else if (inputs[0].type === 'line') {
+        if (replayQueue.length > 0) {
+          const cmd = replayQueue[0];
+          setReplayQueue(prev => prev.slice(1));
+          
+          sendEvent({
+            type: 'line',
+            window: inputs[0].id,
+            value: cmd
+          });
+        } else {
+          setIsReplaying(false);
+        }
+      }
+    }
+  }, [inputs, isReplaying, replayQueue, sendEvent]);
 
   const getGameType = () => {
     if (!gameName) return '';
@@ -400,7 +454,7 @@ export default function App() {
               {localGames.map(game => (
                 <li key={game} className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg border border-transparent hover:border-gray-200 dark:hover:border-gray-600 group">
                   <span className="text-sm truncate flex-1 dark:text-gray-200" title={game}>{game}</span>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                     <button onClick={() => deleteLocalFile(game)} className="text-red-500 hover:text-red-700 p-1" title="Delete">
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -424,7 +478,7 @@ export default function App() {
               {localSaves.map(save => (
                 <li key={save} className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg border border-transparent hover:border-gray-200 dark:hover:border-gray-600 group">
                   <span className="text-sm truncate flex-1 dark:text-gray-200" title={save}>{save}</span>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
                     <button onClick={() => deleteLocalFile(save)} className="text-red-500 hover:text-red-700 p-1" title="Delete">
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -466,11 +520,16 @@ export default function App() {
                 
                 <ul className="space-y-2">
                   {driveFiles.map(file => (
-                    <li key={file.id} className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg border border-transparent hover:border-gray-200 dark:hover:border-gray-600">
+                    <li key={file.id} className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg border border-transparent hover:border-gray-200 dark:hover:border-gray-600 group">
                       <span className="text-sm truncate flex-1 dark:text-gray-200" title={file.name}>{file.name}</span>
-                      <button onClick={() => downloadFromDrive(file)} className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 p-1" title="Download">
-                        <Download className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
+                        <button onClick={() => deleteFromDrive(file)} className="text-red-500 hover:text-red-700 p-1" title="Delete from Drive">
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                        <button onClick={() => downloadFromDrive(file)} className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 p-1" title="Download">
+                          <Download className="w-4 h-4" />
+                        </button>
+                      </div>
                     </li>
                   ))}
                   {driveFiles.length === 0 && !driveLoading && (
@@ -579,7 +638,10 @@ export default function App() {
       >
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-4 mb-4">
           <div className="flex items-center gap-3 w-full sm:w-auto min-w-0">
-            <button onClick={() => setShowSidebar(!showSidebar)} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-700 dark:text-gray-300 shrink-0">
+            <button onClick={() => {
+              if (!showSidebar) refreshLocalGames();
+              setShowSidebar(!showSidebar);
+            }} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-700 dark:text-gray-300 shrink-0">
               <Folder className="w-6 h-6" />
             </button>
             <h1 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-white truncate">
@@ -730,12 +792,19 @@ export default function App() {
           </div>
         )}
 
-        {gameData && inputs.length > 0 && inputs[0].type === 'line' && (
+        {gameData && inputs.length > 0 && inputs[0].type === 'line' && !isReplaying && (
           <div className="flex items-center mt-2 mb-4 p-3 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl shadow-sm shrink-0">
             <span className="mr-2 text-blue-600 dark:text-blue-400 font-bold text-lg">&gt;</span>
             <input
               type="text"
-              className="flex-1 outline-none bg-transparent font-mono text-gray-900 dark:text-gray-100 text-lg"
+              name="if-command-input"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck="false"
+              data-1p-ignore="true"
+              data-lpignore="true"
+              className="flex-1 outline-none bg-transparent font-mono text-gray-900 dark:text-gray-100 text-lg w-full"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleInput}
@@ -747,6 +816,31 @@ export default function App() {
               autoFocus
               placeholder="Enter command..."
             />
+            <div className="flex items-center gap-1 ml-2 md:hidden">
+              <button 
+                onClick={(e) => { e.preventDefault(); handleInput({ key: 'ArrowUp', preventDefault: () => {} } as any); }}
+                className="p-2 bg-gray-100 dark:bg-gray-700 rounded-lg text-gray-600 dark:text-gray-300 active:bg-gray-200 dark:active:bg-gray-600"
+                title="Previous Command"
+              >
+                <ArrowUp className="w-5 h-5" />
+              </button>
+              <button 
+                onClick={(e) => { e.preventDefault(); handleInput({ key: 'ArrowDown', preventDefault: () => {} } as any); }}
+                className="p-2 bg-gray-100 dark:bg-gray-700 rounded-lg text-gray-600 dark:text-gray-300 active:bg-gray-200 dark:active:bg-gray-600"
+                title="Next Command"
+              >
+                <ArrowDown className="w-5 h-5" />
+              </button>
+              <button 
+                onClick={() => {
+                  submitCommand(inputValue);
+                  setHistoryIndex(-1);
+                }}
+                className="p-2 text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-200 bg-indigo-50 dark:bg-indigo-900/30 rounded-lg font-bold"
+              >
+                ↵
+              </button>
+            </div>
           </div>
         )}
       </div>

@@ -175,5 +175,16 @@ export function useGoogleDrive() {
     }
   }, [accessToken, getFolderId, fetchWithAuth]);
 
-  return { login, logout, accessToken, listFiles, downloadFile, uploadFile, loading };
+  const deleteFile = useCallback(async (fileId: string) => {
+    if (!accessToken) return;
+    try {
+      await fetchWithAuth(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+        method: 'DELETE'
+      });
+    } catch (e) {
+      console.error(e);
+    }
+  }, [accessToken, fetchWithAuth]);
+
+  return { login, logout, accessToken, listFiles, downloadFile, uploadFile, deleteFile, loading };
 }

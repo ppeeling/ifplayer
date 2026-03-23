@@ -14,14 +14,62 @@ export default defineConfig(({mode}) => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        injectRegister: 'auto',
         devOptions: { enabled: true },
         workbox: {
-          maximumFileSizeToCacheInBytes: 5000000,
+          maximumFileSizeToCacheInBytes: 15000000,
+          globPatterns: ['**/*.{js,css,html,ico,png,svg,wasm,z3,z5,z8,ulx,gblorb}'],
+          runtimeCaching: [
+            {
+              urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'google-fonts-cache',
+                expiration: {
+                  maxEntries: 10,
+                  maxAgeSeconds: 60 * 60 * 24 * 365
+                },
+                cacheableResponse: {
+                  statuses: [0, 200]
+                }
+              }
+            },
+            {
+              urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'gstatic-fonts-cache',
+                expiration: {
+                  maxEntries: 10,
+                  maxAgeSeconds: 60 * 60 * 24 * 365
+                },
+                cacheableResponse: {
+                  statuses: [0, 200]
+                }
+              }
+            },
+            {
+              urlPattern: /^https:\/\/accounts\.google\.com\/gsi\/client/i,
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'google-gsi-cache',
+                expiration: {
+                  maxEntries: 1,
+                  maxAgeSeconds: 60 * 60 * 24
+                },
+                cacheableResponse: {
+                  statuses: [0, 200]
+                }
+              }
+            }
+          ]
         },
         manifest: {
           name: 'Interactive Fiction Player',
           short_name: 'IF Player',
           theme_color: '#ffffff',
+          display: 'standalone',
+          background_color: '#ffffff',
           icons: [
             {
               src: 'icon.svg',
