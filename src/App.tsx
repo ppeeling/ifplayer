@@ -10,7 +10,7 @@ import gitWasm from 'emglken/build/git.wasm?url';
 import { MyDialog, pendingReads } from './MyDialog';
 import { useGlkOte } from './useGlkOte';
 import { useAI } from './useAI';
-import { Loader2, Sparkles, Settings, Play, RefreshCw, RotateCcw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
+import { Loader2, Sparkles, Settings, Play, RefreshCw, RotateCcw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2, ArrowUp, ArrowDown, Unlock, ExternalLink } from 'lucide-react';
 import localforage from 'localforage';
 import { extractStrings, findRelevantStrings } from './services/stringExtractor';
 
@@ -37,7 +37,17 @@ export default function App() {
   const [historyIndex, setHistoryIndex] = useState(-1);
   
   const [gameStatus, setGameStatus] = useState<'idle' | 'loading' | 'playing' | 'ended' | 'error'>('idle');
+  const isIframe = window.self !== window.top;
+  
+  // Wrapped setGameStatus with logging
+  const updateGameStatus = (status: typeof gameStatus) => {
+    console.log(`Game Status changing from ${gameStatus} to ${status}`);
+    setGameStatus(status);
+  };
+
   const [lastError, setLastError] = useState<string | null>(null);
+  const [directoryHandle, setDirectoryHandle] = useState<any | null>(null);
+  const [directoryPermission, setDirectoryPermission] = useState<'granted' | 'prompt' | 'denied'>('prompt');
   
   const [showSidebar, setShowSidebar] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(false);
@@ -75,6 +85,13 @@ export default function App() {
       // Try to load the last game played
       const lastGameName = await localforage.getItem<string>('lastGameName');
       const lastGameData = await localforage.getItem<Uint8Array>('lastGameData');
+      const savedDirHandle = await localforage.getItem<any>('directoryHandle');
+
+      if (savedDirHandle) {
+        setDirectoryHandle(savedDirHandle);
+        const permission = await savedDirHandle.queryPermission({ mode: 'readwrite' });
+        setDirectoryPermission(permission);
+      }
 
       if (lastGameName && lastGameData) {
         loadGameData(lastGameName, lastGameData);
@@ -109,7 +126,7 @@ export default function App() {
     setGameData(new Uint8Array(data));
     setGameStrings(extractStrings(data));
     setHistory([]);
-    setGameStatus('loading');
+    updateGameStatus('loading');
     setLastError(null);
 
     // Persist as last game played
@@ -128,6 +145,40 @@ export default function App() {
     // Reset file input
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
+    }
+  };
+
+  const handleOpenGame = async () => {
+    try {
+      if ('showOpenFilePicker' in window) {
+        const [handle] = await (window as any).showOpenFilePicker({
+          types: [
+            {
+              description: 'Interactive Fiction Games',
+              accept: {
+                'application/x-zmachine': ['.z3', '.z5', '.z8'],
+                'application/x-glulx': ['.ulx', '.gblorb']
+              }
+            }
+          ],
+          id: 'if-player',
+          startIn: 'documents'
+        });
+        
+        const file = await handle.getFile();
+        const buffer = await file.arrayBuffer();
+        const data = new Uint8Array(buffer);
+        loadGameData(file.name, data);
+      } else {
+        fileInputRef.current?.click();
+      }
+    } catch (err: any) {
+      if (err.name === 'SecurityError' || err.message.includes('Cross origin sub frames')) {
+        console.warn('File picker restricted in iframe, falling back to standard upload.');
+        fileInputRef.current?.click();
+      } else if (err.name !== 'AbortError') {
+        console.error('Failed to open game:', err);
+      }
     }
   };
 
@@ -159,8 +210,7 @@ export default function App() {
     let vm: any;
     
     const initVM = async () => {
-      console.log('initVM function started. Setting status to playing...');
-      setGameStatus('playing'); 
+      console.log('initVM function started. Status is currently:', gameStatus);
       try {
         console.log('Starting VM initialization for:', gameName, 'Session:', gameSessionId);
         console.log('gameData size:', gameData.length, 'First 4 bytes:', gameData.slice(0, 4));
@@ -168,7 +218,13 @@ export default function App() {
         
         const sessionId = gameSessionId;
         console.log('Creating MyDialog instance...');
-        const Dialog = new MyDialog(gameName, gameData);
+        
+        // Just check permission, don't request it here (it would fail in useEffect)
+        if (directoryHandle) {
+          await verifyDirectoryPermission();
+        }
+        
+        const Dialog = new MyDialog(gameName, gameData, directoryHandle);
         
         const isGit = gameName.endsWith('.ulx') || gameName.endsWith('.gblorb');
         const factory = isGit ? Git : Bocfel;
@@ -177,11 +233,27 @@ export default function App() {
         console.log('WASM factory type:', typeof factory, 'isGit:', isGit);
         console.log('WASM URL:', wasm);
         
-        // Load WASM binary manually for better reliability
+        // Load WASM binary manually for better reliability with timeout and cache busting
         let wasmBinary: ArrayBuffer | undefined;
         try {
           console.log('Fetching WASM binary manually from:', wasm);
-          const wasmResponse = await fetch(wasm);
+          
+          const fetchWithTimeout = async (url: string, timeout = 10000) => {
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), timeout);
+            try {
+              const response = await fetch(`${url}${url.includes('?') ? '&' : '?'}cb=${Date.now()}`, { 
+                signal: controller.signal 
+              });
+              clearTimeout(id);
+              return response;
+            } catch (e) {
+              clearTimeout(id);
+              throw e;
+            }
+          };
+
+          const wasmResponse = await fetchWithTimeout(wasm);
           console.log('WASM fetch status:', wasmResponse.status, wasmResponse.statusText);
           if (!wasmResponse.ok) {
             throw new Error(`Failed to fetch WASM binary: ${wasmResponse.status} ${wasmResponse.statusText}`);
@@ -189,9 +261,11 @@ export default function App() {
           wasmBinary = await wasmResponse.arrayBuffer();
           console.log('WASM binary loaded, size:', wasmBinary.byteLength);
         } catch (fetchErr: any) {
-          console.error('Error loading WASM binary manually:', fetchErr);
+          console.error('Error loading WASM binary manually (falling back to internal fetch):', fetchErr);
           // Fallback to locateFile if manual fetch fails
         }
+
+        if (cancelled) return;
 
         console.log('Loading WASM factory (awaiting factory function)...');
         
@@ -205,12 +279,15 @@ export default function App() {
         });
         
         const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('WASM factory loading timed out after 15s')), 15000)
+          setTimeout(() => reject(new Error('WASM factory loading timed out after 20s')), 20000)
         );
         
         try {
           vm = await Promise.race([factoryPromise, timeoutPromise]);
-          console.log('WASM factory loaded successfully.');
+          console.log('WASM factory loaded successfully. Setting status to playing...');
+          if (!cancelled) {
+            updateGameStatus('playing');
+          }
         } catch (raceErr: any) {
           console.error('WASM factory loading failed or timed out:', raceErr);
           throw raceErr;
@@ -236,12 +313,18 @@ export default function App() {
 
         console.log('Calling vm.start with sessionGlkOte...');
         try {
-          await vm.start({
+          const vmStartPromise = vm.start({
             Dialog,
             GlkOte: sessionGlkOte,
             arguments: [gameName]
           });
-          console.log('VM.start promise resolved for session:', sessionId, '. Note: Game might still be running if this resolved prematurely.');
+          
+          const vmStartTimeout = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('VM start timed out after 20s')), 20000)
+          );
+          
+          await Promise.race([vmStartPromise, vmStartTimeout]);
+          console.log('VM.start promise resolved for session:', sessionId);
           // We don't set 'ended' here because some VMs might resolve the promise 
           // before the game actually finishes (e.g. if they aren't fully blocking).
           // We rely on the ExitStatus exception to detect the real end of the game.
@@ -253,10 +336,10 @@ export default function App() {
           // Catch ExitStatus rejection which is normal when a game ends or is restarted
           if (err && err.name === 'ExitStatus') {
             console.log('Game session ended normally (ExitStatus):', err.message);
-            setGameStatus('ended');
+            updateGameStatus('ended');
           } else {
             console.error('VM Start Error (inside vm.start catch):', err);
-            setGameStatus('error');
+            updateGameStatus('error');
             setLastError(err.message || String(err));
           }
         }
@@ -266,7 +349,7 @@ export default function App() {
           return;
         }
         console.error('VM Initialization Error (outer catch):', err);
-        setGameStatus('error');
+        updateGameStatus('error');
         setLastError(err.message || String(err));
       }
     };
@@ -435,6 +518,50 @@ export default function App() {
     }
   };
 
+  const handleSetDirectory = async () => {
+    try {
+      if ('showDirectoryPicker' in window) {
+        const handle = await (window as any).showDirectoryPicker({
+          mode: 'readwrite'
+        });
+        setDirectoryHandle(handle);
+        setDirectoryPermission('granted');
+        await localforage.setItem('directoryHandle', handle);
+      } else {
+        alert('Your browser does not support the File System Access API. Please use a modern browser like Chrome or Edge.');
+      }
+    } catch (err: any) {
+      console.error('Failed to set directory:', err);
+      if (err.name === 'SecurityError' || err.message.includes('Cross origin sub frames')) {
+        alert('Security restriction: Browsers do not allow linking folders when the app is inside an iframe. Please open the app in a new tab (using the button in the settings) to use this feature.');
+      }
+    }
+  };
+
+  const requestDirectoryPermission = async () => {
+    if (!directoryHandle) return;
+    try {
+      const request = await directoryHandle.requestPermission({ mode: 'readwrite' });
+      setDirectoryPermission(request);
+      return request === 'granted';
+    } catch (err) {
+      console.error('Error requesting permission:', err);
+      return false;
+    }
+  };
+
+  const verifyDirectoryPermission = async () => {
+    if (!directoryHandle) return false;
+    try {
+      const permission = await directoryHandle.queryPermission({ mode: 'readwrite' });
+      setDirectoryPermission(permission);
+      return permission === 'granted';
+    } catch (err) {
+      console.error('Error verifying permission:', err);
+      return false;
+    }
+  };
+
   const getMaskedKey = () => {
     const key = manualApiKey || process.env.GEMINI_API_KEY;
     if (!key || key === 'undefined' || key === 'null') return 'Not detected (Missing in Secrets)';
@@ -574,6 +701,47 @@ export default function App() {
                 >
                   <Trash2 className="w-3 h-3" /> Clear App Cache & Refresh
                 </button>
+
+                <div className="border-t border-gray-200 dark:border-gray-700 pt-4">
+                  <p className="text-[10px] font-bold text-gray-400 uppercase mb-2">Local File System</p>
+                  
+                  {isIframe ? (
+                    <div className="bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-900/30 p-3 rounded-lg">
+                      <p className="text-[10px] text-amber-700 dark:text-amber-400 mb-2">
+                        Folder linking is restricted in the preview window. Open in a new tab to enable direct saving to your PC.
+                      </p>
+                      <button 
+                        onClick={() => window.open(window.location.href, '_blank')}
+                        className="w-full flex items-center justify-center gap-2 text-xs bg-amber-600 text-white px-3 py-2 rounded-lg hover:bg-amber-700 transition-colors shadow-sm"
+                      >
+                        <ExternalLink className="w-3 h-3" /> Open in New Tab
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button 
+                        onClick={handleSetDirectory}
+                        className={`w-full flex items-center justify-center gap-2 text-xs px-3 py-2 rounded-lg transition-colors border ${directoryHandle ? 'bg-emerald-50 dark:bg-emerald-900/10 border-emerald-200 dark:border-emerald-800 text-emerald-600' : 'bg-white dark:bg-gray-800 border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
+                      >
+                        <Settings className="w-3 h-3" /> {directoryHandle ? 'Change Game Folder' : 'Set Game Folder'}
+                      </button>
+                      {directoryHandle && (
+                        <div className="mt-2 space-y-2">
+                          <p className="text-[10px] text-emerald-600 text-center">Folder linked: {directoryHandle.name}</p>
+                          {directoryPermission !== 'granted' && (
+                            <button 
+                              onClick={requestDirectoryPermission}
+                              className="w-full flex items-center justify-center gap-2 text-[10px] bg-amber-50 dark:bg-amber-900/20 text-amber-700 border border-amber-200 dark:border-amber-800 px-2 py-1 rounded hover:bg-amber-100 transition-colors"
+                            >
+                              <Unlock className="w-3 h-3" /> Unlock Folder Access
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      <p className="text-[10px] text-gray-500 mt-1">Allows saving directly to your PC instead of Downloads.</p>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -598,7 +766,7 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0 no-scrollbar shrink-0">
             <button 
-              onClick={() => fileInputRef.current?.click()}
+              onClick={handleOpenGame}
               className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-indigo-600 dark:text-indigo-400 shrink-0"
               title="Upload Game File"
             >
@@ -612,7 +780,7 @@ export default function App() {
               accept=".z3,.z5,.z8,.ulx,.gblorb"
             />
             <button 
-              onClick={() => window.location.href = window.location.origin}
+              onClick={() => window.location.reload()}
               className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-700 dark:text-gray-300 shrink-0"
               title="Refresh App"
             >
