@@ -58,6 +58,7 @@ export default function App() {
   const [filePromptInput, setFilePromptInput] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const saveFileInputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<MyDialog | null>(null);
   const lastSuggestedTurn = useRef(-1);
 
   useEffect(() => {
@@ -79,6 +80,12 @@ export default function App() {
       localStorage.setItem('darkMode', 'false');
     }
   };
+
+  useEffect(() => {
+    if (dialogRef.current) {
+      dialogRef.current.directoryHandle = directoryHandle;
+    }
+  }, [directoryHandle]);
 
   useEffect(() => {
     const initDefaultGame = async () => {
@@ -225,6 +232,7 @@ export default function App() {
         }
         
         const Dialog = new MyDialog(gameName, gameData, directoryHandle);
+        dialogRef.current = Dialog;
         
         const isGit = gameName.endsWith('.ulx') || gameName.endsWith('.gblorb');
         const factory = isGit ? Git : Bocfel;

@@ -62,39 +62,53 @@ export class MyDialog {
   }
   
   async write(files: Record<string, Uint8Array>) {
+    console.log('MyDialog.write called with files:', Object.keys(files));
     try {
       for (const [path, data] of Object.entries(files)) {
         let writtenToDisk = false;
+        
+        // Clean the path to just the filename for the directory handle
+        const filename = path.replace(/\\/g, '/').split('/').pop() || path;
 
         // Try writing to directory handle if available
         if (this.directoryHandle) {
+          console.log(`Attempting to save ${filename} to directory handle: ${this.directoryHandle.name}`);
           try {
             // Check if we have permission and if createWritable is supported
             const permission = await this.directoryHandle.queryPermission({ mode: 'readwrite' });
+            console.log(`Directory permission for ${this.directoryHandle.name}: ${permission}`);
+            
             if (permission === 'granted') {
-              const fileHandle = await this.directoryHandle.getFileHandle(path, { create: true });
+              const fileHandle = await this.directoryHandle.getFileHandle(filename, { create: true });
+              console.log(`Got file handle for ${filename}`);
+              
               if (typeof fileHandle.createWritable === 'function') {
                 const writable = await fileHandle.createWritable();
                 await writable.write(data);
                 await writable.close();
                 writtenToDisk = true;
-                console.log(`Successfully saved ${path} to local directory.`);
+                console.log(`Successfully saved ${filename} to local directory: ${this.directoryHandle.name}`);
               } else {
-                console.warn(`createWritable not supported on file handle for ${path}. Falling back to download.`);
+                console.warn(`createWritable not supported on file handle for ${filename}. Falling back to download.`);
               }
+            } else {
+              console.warn(`Permission not granted for directory ${this.directoryHandle.name}. Status: ${permission}. Falling back to download.`);
             }
           } catch (e) {
-            console.warn(`Failed to save ${path} to local directory, falling back to download.`, e);
+            console.warn(`Failed to save ${filename} to local directory, falling back to download.`, e);
           }
+        } else {
+          console.log('No directory handle available in MyDialog. Falling back to download.');
         }
 
         if (!writtenToDisk) {
+          console.log(`Triggering browser download for ${filename} as fallback.`);
           // Trigger a download for the file as fallback
           const blob = new Blob([data], { type: 'application/octet-stream' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          a.download = path;
+          a.download = filename;
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
@@ -103,6 +117,7 @@ export class MyDialog {
         
         // Also store in localforage for internal persistence
         await localforage.setItem(path, data);
+        await localforage.setItem(filename, data); // Store both for easier lookup
       }
     } catch (e) {
       console.error('Failed to write files', e);
