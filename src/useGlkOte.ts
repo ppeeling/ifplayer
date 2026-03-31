@@ -7,15 +7,23 @@ export function useGlkOte() {
   const [filePrompt, setFilePrompt] = useState<{ type: string, filetype: string, filemode?: string } | null>(null);
   const acceptFuncRef = useRef<any>(null);
   const genRef = useRef<number>(0);
+  const currentSessionRef = useRef<number>(0);
 
   const sendEvent = useCallback((event: any) => {
     if (acceptFuncRef.current) {
+      console.log('Sending event:', event);
       acceptFuncRef.current({ ...event, gen: genRef.current });
     }
   }, []);
 
   const GlkOte = useRef({
     init: async (options: any) => {
+      const sessionId = options.sessionId || 0;
+      if (sessionId < currentSessionRef.current) {
+        console.warn('Ignoring init from old session');
+        return;
+      }
+      console.log('GlkOte init, session:', sessionId);
       acceptFuncRef.current = options.accept;
       genRef.current = 0;
       acceptFuncRef.current({
@@ -43,6 +51,11 @@ export function useGlkOte() {
       });
     },
     update: (data: any) => {
+      const sessionId = data.sessionId || 0;
+      if (sessionId < currentSessionRef.current) {
+        console.warn('Ignoring update from old session');
+        return;
+      }
       console.log('GlkOte update:', data);
       
       if (typeof data.gen === 'number') {
@@ -95,6 +108,11 @@ export function useGlkOte() {
       
       if (data.input) {
         setInputs(data.input);
+      } else if (data.type === 'update' && !data.content && !data.windows) {
+        // If it's a pure update with no input, it might mean input is finished
+        // But GlkOte spec says missing input means unchanged.
+        // However, some VMs might expect us to clear it if it's not present in a full update.
+        // We'll stick to the spec for now but keep an eye on it.
       }
 
       if (data.specialinput) {
@@ -110,10 +128,14 @@ export function useGlkOte() {
     
     let value = null;
     if (filename) {
-      let ext = '.glkdata';
-      if (filePrompt.filetype === 'command' || filePrompt.filetype === 'transcript') ext = '.txt';
-      else if (filePrompt.filetype === 'save') ext = '.glksave';
-      value = `${filename}${ext}`;
+      if (filePrompt.filemode === 'read') {
+        value = filename;
+      } else {
+        let ext = '.glkdata';
+        if (filePrompt.filetype === 'command' || filePrompt.filetype === 'transcript') ext = '.txt';
+        else if (filePrompt.filetype === 'save') ext = '.glksave';
+        value = `${filename}${ext}`;
+      }
     }
     
     setFilePrompt(null);
@@ -129,10 +151,12 @@ export function useGlkOte() {
   }, [filePrompt]);
 
   const clearState = useCallback(() => {
+    currentSessionRef.current += 1;
     setWindows([]);
     setInputs([]);
     setWindowBuffers({});
     setFilePrompt(null);
+    return currentSessionRef.current;
   }, []);
 
   return { GlkOte, sendEvent, windows, windowBuffers, inputs, clearState, filePrompt, submitFilePrompt };

@@ -5,22 +5,24 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { Bocfel, Git } from 'emglken';
-import { MyDialog } from './MyDialog';
+import bocfelWasm from 'emglken/build/bocfel.wasm?url';
+import gitWasm from 'emglken/build/git.wasm?url';
+import { MyDialog, pendingReads } from './MyDialog';
 import { useGlkOte } from './useGlkOte';
 import { useAI } from './useAI';
-import { useGoogleDrive } from './useGoogleDrive';
-import { Loader2, Sparkles, Folder, Download, Play, LogIn, LogOut, RefreshCw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
+import { Loader2, Sparkles, Settings, Play, RefreshCw, RotateCcw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2, ArrowUp, ArrowDown } from 'lucide-react';
 import localforage from 'localforage';
 import { extractStrings, findRelevantStrings } from './services/stringExtractor';
 
 export default function App() {
   const { GlkOte, sendEvent, windows, windowBuffers, inputs, clearState, filePrompt, submitFilePrompt } = useGlkOte();
   const { suggestions, hintAnswer, loading: aiLoading, error: aiError, getSuggestions, setSuggestions, setHintAnswer } = useAI();
-  const { login, logout, accessToken, listFiles, downloadFile, uploadFile, deleteFile, loading: driveLoading } = useGoogleDrive();
   
   const [gameData, setGameData] = useState<Uint8Array | null>(null);
   const [gameName, setGameName] = useState<string>('');
+  const [gameSessionId, setGameSessionId] = useState<number>(0);
   const [gameStrings, setGameStrings] = useState<string[]>([]);
+  const [showHintInput, setShowHintInput] = useState(false);
   const [aiMode, setAiMode] = useState<'command' | 'hint'>('command');
   const [hintQuestion, setHintQuestion] = useState('');
   const [aiSettings, setAiSettings] = useState({
@@ -34,9 +36,9 @@ export default function App() {
   const [currentOutput, setCurrentOutput] = useState<string>('');
   const [historyIndex, setHistoryIndex] = useState(-1);
   
-  const [localGames, setLocalGames] = useState<string[]>([]);
-  const [localSaves, setLocalSaves] = useState<string[]>([]);
-  const [driveFiles, setDriveFiles] = useState<any[]>([]);
+  const [gameStatus, setGameStatus] = useState<'idle' | 'loading' | 'playing' | 'ended' | 'error'>('idle');
+  const [lastError, setLastError] = useState<string | null>(null);
+  
   const [showSidebar, setShowSidebar] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [autoSuggest, setAutoSuggest] = useState(false);
@@ -44,11 +46,9 @@ export default function App() {
   const [manualApiKey, setManualApiKey] = useState(localStorage.getItem('GEMINI_API_KEY_OVERRIDE') || '');
   const [showDebug, setShowDebug] = useState(false);
   const [filePromptInput, setFilePromptInput] = useState('');
-  const [isSyncing, setIsSyncing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const saveFileInputRef = useRef<HTMLInputElement>(null);
   const lastSuggestedTurn = useRef(-1);
-  const [replayQueue, setReplayQueue] = useState<string[]>([]);
-  const [isReplaying, setIsReplaying] = useState(false);
 
   useEffect(() => {
     // Check local storage for dark mode preference
@@ -72,62 +72,49 @@ export default function App() {
 
   useEffect(() => {
     const initDefaultGame = async () => {
-      const exists = await localforage.getItem('minizork.z3');
+      // Try to load the last game played
+      const lastGameName = await localforage.getItem<string>('lastGameName');
+      const lastGameData = await localforage.getItem<Uint8Array>('lastGameData');
+
+      if (lastGameName && lastGameData) {
+        loadGameData(lastGameName, lastGameData);
+        return;
+      }
+
+      // Fallback to minizork.z3
+      const exists = await localforage.getItem<Uint8Array>('minizork.z3');
       if (!exists) {
         try {
           const res = await fetch(`${import.meta.env.BASE_URL}minizork.z3`);
           const buffer = await res.arrayBuffer();
-          await localforage.setItem('minizork.z3', new Uint8Array(buffer));
-          refreshLocalGames();
+          const data = new Uint8Array(buffer);
+          await localforage.setItem('minizork.z3', data);
+          if (!gameName) {
+            loadGameData('minizork.z3', data);
+          }
         } catch (err) {
           console.error('Failed to load default game:', err);
         }
-      } else {
-        refreshLocalGames();
+      } else if (!gameName) {
+        loadGameData('minizork.z3', exists);
       }
     };
     initDefaultGame();
   }, []);
 
-  const refreshLocalGames = async () => {
-    const keys = await localforage.keys();
-    // Filter out save files (assuming games end with .z3, .z5, .z8, .ulx, .gblorb)
-    const games = keys.filter(k => k.match(/\.(z\d|ulx|gblorb)$/i));
-    const saves = keys.filter(k => !k.match(/\.(z\d|ulx|gblorb)$/i) && !k.startsWith('autosave_'));
-    setLocalGames(games);
-    setLocalSaves(saves);
-    
-    // Auto-load first game if available and no game is loaded
-    if (games.length > 0 && !gameName) {
-      loadLocalGame(games[0]);
-    }
-  };
+  const loadGameData = async (name: string, data: Uint8Array) => {
+    const sessionId = clearState();
+    setGameSessionId(sessionId);
+    setGameName(name);
+    setGameData(new Uint8Array(data));
+    setGameStrings(extractStrings(data));
+    setHistory([]);
+    setGameStatus('loading');
+    setLastError(null);
 
-  const loadLocalGame = async (name: string) => {
-    const data = await localforage.getItem<Uint8Array>(name);
-    if (data) {
-      clearState();
-      setGameName(name);
-      setGameData(data);
-      setGameStrings(extractStrings(data));
-      setShowSidebar(false);
-      
-      const autosave = await localforage.getItem<string[]>(`autosave_${name}`);
-      if (autosave && autosave.length > 0) {
-        // Auto-restore without asking
-        setReplayQueue(autosave);
-        setIsReplaying(true);
-        setHistory(autosave);
-      } else {
-        setHistory([]);
-      }
-    }
-  };
-
-  const deleteLocalFile = async (name: string) => {
-    await localforage.removeItem(name);
-    await localforage.removeItem(`autosave_${name}`);
-    refreshLocalGames();
+    // Persist as last game played
+    await localforage.setItem('lastGameName', name);
+    await localforage.setItem('lastGameData', data);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -136,10 +123,7 @@ export default function App() {
 
     const buffer = await file.arrayBuffer();
     const data = new Uint8Array(buffer);
-    await localforage.setItem(file.name, data);
-    setGameStrings(extractStrings(data));
-    refreshLocalGames();
-    loadLocalGame(file.name);
+    loadGameData(file.name, data);
     
     // Reset file input
     if (fileInputRef.current) {
@@ -147,73 +131,152 @@ export default function App() {
     }
   };
 
-  const handleDriveSync = async () => {
-    if (!accessToken) return;
-    const files = await listFiles();
-    setDriveFiles(files);
-  };
-
-  const downloadFromDrive = async (file: any) => {
-    const data = await downloadFile(file.id);
-    if (data) {
-      await localforage.setItem(file.name, data);
-      refreshLocalGames();
+  const handleSaveFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) {
+      submitFilePrompt(null);
+      return;
     }
-  };
 
-  const deleteFromDrive = async (file: any) => {
-    if (window.confirm(`Are you sure you want to delete ${file.name} from Google Drive?`)) {
-      await deleteFile(file.id);
-      handleDriveSync();
-    }
-  };
-
-  const syncAllToDrive = async () => {
-    if (!accessToken) return;
-    setIsSyncing(true);
-    try {
-      const keys = await localforage.keys();
-      for (const key of keys) {
-        const data = await localforage.getItem<Uint8Array>(key);
-        if (data) {
-          await uploadFile(key, data);
-        }
-      }
-      await handleDriveSync();
-      alert('All local files (games and saves) synced to Google Drive!');
-    } catch (err) {
-      console.error('Failed to sync to drive:', err);
-      alert('An error occurred while syncing to Google Drive.');
-    } finally {
-      setIsSyncing(false);
+    const buffer = await file.arrayBuffer();
+    const data = new Uint8Array(buffer);
+    
+    // Store in memory for MyDialog to read
+    pendingReads[file.name] = data;
+    submitFilePrompt(file.name);
+    
+    // Reset file input
+    if (saveFileInputRef.current) {
+      saveFileInputRef.current.value = '';
     }
   };
 
   useEffect(() => {
+    console.log('VM Effect triggered. gameData:', !!gameData, 'gameName:', gameName, 'sessionId:', gameSessionId);
     if (!gameData || !gameName) return;
 
+    let cancelled = false;
     let vm: any;
+    
     const initVM = async () => {
+      console.log('initVM function started. Setting status to playing...');
+      setGameStatus('playing'); 
       try {
+        console.log('Starting VM initialization for:', gameName, 'Session:', gameSessionId);
+        console.log('gameData size:', gameData.length, 'First 4 bytes:', gameData.slice(0, 4));
+        setLastError(null);
+        
+        const sessionId = gameSessionId;
+        console.log('Creating MyDialog instance...');
         const Dialog = new MyDialog(gameName, gameData);
-        if (gameName.endsWith('.ulx') || gameName.endsWith('.gblorb')) {
-          vm = await Git();
-        } else {
-          vm = await Bocfel();
+        
+        const isGit = gameName.endsWith('.ulx') || gameName.endsWith('.gblorb');
+        const factory = isGit ? Git : Bocfel;
+        const wasm = isGit ? gitWasm : bocfelWasm;
+        
+        console.log('WASM factory type:', typeof factory, 'isGit:', isGit);
+        console.log('WASM URL:', wasm);
+        
+        // Load WASM binary manually for better reliability
+        let wasmBinary: ArrayBuffer | undefined;
+        try {
+          console.log('Fetching WASM binary manually from:', wasm);
+          const wasmResponse = await fetch(wasm);
+          console.log('WASM fetch status:', wasmResponse.status, wasmResponse.statusText);
+          if (!wasmResponse.ok) {
+            throw new Error(`Failed to fetch WASM binary: ${wasmResponse.status} ${wasmResponse.statusText}`);
+          }
+          wasmBinary = await wasmResponse.arrayBuffer();
+          console.log('WASM binary loaded, size:', wasmBinary.byteLength);
+        } catch (fetchErr: any) {
+          console.error('Error loading WASM binary manually:', fetchErr);
+          // Fallback to locateFile if manual fetch fails
+        }
+
+        console.log('Loading WASM factory (awaiting factory function)...');
+        
+        // Add a timeout to the factory call
+        const factoryPromise = factory({
+          wasmBinary,
+          locateFile: (path: string) => {
+            console.log('locateFile called for path:', path, 'Returning:', wasm);
+            return wasm;
+          }
+        });
+        
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('WASM factory loading timed out after 15s')), 15000)
+        );
+        
+        try {
+          vm = await Promise.race([factoryPromise, timeoutPromise]);
+          console.log('WASM factory loaded successfully.');
+        } catch (raceErr: any) {
+          console.error('WASM factory loading failed or timed out:', raceErr);
+          throw raceErr;
         }
         
-        vm.start({
-          Dialog,
-          GlkOte,
-          arguments: [gameName]
-        });
-      } catch (err) {
-        console.error('VM Error:', err);
+        if (cancelled) {
+          console.log('Initialization cancelled after WASM load for session:', sessionId);
+          return;
+        }
+
+        console.log('Wrapping GlkOte methods for session isolation...');
+        const sessionGlkOte = {
+          ...GlkOte,
+          init: (options: any) => {
+            console.log('GlkOte.init wrapper called for session:', sessionId);
+            return GlkOte.init({ ...options, sessionId });
+          },
+          update: (data: any) => {
+            // Only log updates if they aren't too frequent or if we're debugging
+            return GlkOte.update({ ...data, sessionId });
+          }
+        };
+
+        console.log('Calling vm.start with sessionGlkOte...');
+        try {
+          await vm.start({
+            Dialog,
+            GlkOte: sessionGlkOte,
+            arguments: [gameName]
+          });
+          console.log('VM.start promise resolved for session:', sessionId, '. Note: Game might still be running if this resolved prematurely.');
+          // We don't set 'ended' here because some VMs might resolve the promise 
+          // before the game actually finishes (e.g. if they aren't fully blocking).
+          // We rely on the ExitStatus exception to detect the real end of the game.
+        } catch (err: any) {
+          if (cancelled) {
+            console.log('VM.start threw but effect was cancelled. Error:', err);
+            return;
+          }
+          // Catch ExitStatus rejection which is normal when a game ends or is restarted
+          if (err && err.name === 'ExitStatus') {
+            console.log('Game session ended normally (ExitStatus):', err.message);
+            setGameStatus('ended');
+          } else {
+            console.error('VM Start Error (inside vm.start catch):', err);
+            setGameStatus('error');
+            setLastError(err.message || String(err));
+          }
+        }
+      } catch (err: any) {
+        if (cancelled) {
+          console.log('initVM threw but effect was cancelled. Error:', err);
+          return;
+        }
+        console.error('VM Initialization Error (outer catch):', err);
+        setGameStatus('error');
+        setLastError(err.message || String(err));
       }
     };
 
     initVM();
-  }, [gameData, gameName, GlkOte]);
+    return () => {
+      console.log('Cleaning up VM effect for session:', gameSessionId);
+      cancelled = true;
+    };
+  }, [gameData, gameName, GlkOte, gameSessionId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -231,9 +294,29 @@ export default function App() {
 
   useEffect(() => {
     if (filePrompt) {
-      setFilePromptInput('');
+      if (filePrompt.filemode === 'write' || filePrompt.filetype === 'save') {
+        const date = new Date();
+        const timestamp = date.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const baseName = gameName ? gameName.replace(/\.[^/.]+$/, "") : "save";
+        setFilePromptInput(`${baseName}_${timestamp}`);
+      } else {
+        setFilePromptInput('');
+      }
+      
+      if (filePrompt.filemode === 'read') {
+        // Automatically trigger file selection
+        setTimeout(() => {
+          if (saveFileInputRef.current) {
+            const handleCancel = () => {
+              submitFilePrompt(null);
+            };
+            saveFileInputRef.current.addEventListener('cancel', handleCancel, { once: true });
+            saveFileInputRef.current.click();
+          }
+        }, 100);
+      }
     }
-  }, [filePrompt]);
+  }, [filePrompt, gameName]);
 
   const handleInput = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && inputs.length > 0) {
@@ -278,22 +361,16 @@ export default function App() {
       const newHistory = [...history, cmd];
       setHistory(newHistory);
       
-      const lowerCmd = cmd.toLowerCase().trim();
-      if (['restart', 'restore', 'quit'].includes(lowerCmd)) {
-        localforage.removeItem(`autosave_${gameName}`);
-      } else if (lowerCmd !== 'save') {
-        localforage.setItem(`autosave_${gameName}`, newHistory.filter(c => !['save', 'restore', 'restart', 'quit'].includes(c.toLowerCase().trim())));
-      }
-
       setInputValue('');
       if (!autoSuggest) {
         setSuggestions([]);
       }
     } else if (inputReq.type === 'char') {
+      const char = cmd.length > 0 ? cmd[0] : 'return';
       sendEvent({
         type: 'char',
         window: inputReq.id,
-        value: 'return'
+        value: char === ' ' ? 'space' : char
       });
       setInputValue('');
     }
@@ -303,31 +380,6 @@ export default function App() {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, 100);
   };
-
-  useEffect(() => {
-    if (isReplaying && inputs.length > 0) {
-      if (inputs[0].type === 'char') {
-        sendEvent({
-          type: 'char',
-          window: inputs[0].id,
-          value: 'return'
-        });
-      } else if (inputs[0].type === 'line') {
-        if (replayQueue.length > 0) {
-          const cmd = replayQueue[0];
-          setReplayQueue(prev => prev.slice(1));
-          
-          sendEvent({
-            type: 'line',
-            window: inputs[0].id,
-            value: cmd
-          });
-        } else {
-          setIsReplaying(false);
-        }
-      }
-    }
-  }, [inputs, isReplaying, replayQueue, sendEvent]);
 
   const getGameType = () => {
     if (!gameName) return '';
@@ -349,7 +401,7 @@ export default function App() {
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      if (inputs.length > 0 && inputs[0].type === 'char' && !isReplaying) {
+      if (inputs.length > 0 && inputs[0].type === 'char') {
         e.preventDefault();
         submitCommand('return');
       }
@@ -357,7 +409,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [inputs, isReplaying]);
+  }, [inputs]);
 
   const handleSuggest = () => {
     const relevant = findRelevantStrings(gameStrings, currentOutput);
@@ -366,7 +418,7 @@ export default function App() {
   };
 
   const clearAppCache = async () => {
-    if (window.confirm('This will clear all local settings and refresh the app. Your game saves in Google Drive will not be affected. Continue?')) {
+    if (window.confirm('This will clear all local settings and refresh the app. Continue?')) {
       // Clear localForage
       await localforage.clear();
       // Clear localStorage
@@ -425,128 +477,18 @@ export default function App() {
         <div 
           className="p-4 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center bg-indigo-50 dark:bg-gray-800 cursor-pointer hover:bg-indigo-100 dark:hover:bg-gray-700 transition-colors"
           onClick={() => setShowSidebar(false)}
-          title="Close Library"
+          title="Close Settings"
         >
           <h2 className="font-bold text-indigo-900 dark:text-indigo-300 flex items-center gap-2">
-            <Folder className="w-5 h-5" /> Library
+            <Settings className="w-5 h-5" /> Settings
           </h2>
           <button className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 md:hidden">✕</button>
           <button className="hidden md:block text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">✕</button>
         </div>
         
         <div className="flex-1 overflow-y-auto p-4">
-          <div className="flex justify-between items-center mb-3">
-            <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Local Games</h3>
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300"
-              title="Upload Game"
-            >
-              <Upload className="w-4 h-4" />
-            </button>
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              onChange={handleFileUpload} 
-              className="hidden" 
-              accept=".z3,.z5,.z8,.ulx,.gblorb"
-            />
-          </div>
-          
-          {localGames.length === 0 ? (
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">No games downloaded yet.</p>
-          ) : (
-            <ul className="space-y-2 mb-6">
-              {localGames.map(game => (
-                <li key={game} className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg border border-transparent hover:border-gray-200 dark:hover:border-gray-600 group">
-                  <span className="text-sm truncate flex-1 dark:text-gray-200" title={game}>{game}</span>
-                  <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                    <button onClick={() => deleteLocalFile(game)} className="text-red-500 hover:text-red-700 p-1" title="Delete">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                    <button onClick={() => loadLocalGame(game)} className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 p-1" title="Play">
-                      <Play className="w-4 h-4" />
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <div className="flex justify-between items-center mb-3">
-            <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Local Saves</h3>
-          </div>
-          
-          {localSaves.length === 0 ? (
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-6">No saves found.</p>
-          ) : (
-            <ul className="space-y-2 mb-6">
-              {localSaves.map(save => (
-                <li key={save} className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg border border-transparent hover:border-gray-200 dark:hover:border-gray-600 group">
-                  <span className="text-sm truncate flex-1 dark:text-gray-200" title={save}>{save}</span>
-                  <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                    <button onClick={() => deleteLocalFile(save)} className="text-red-500 hover:text-red-700 p-1" title="Delete">
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <div className="border-t border-gray-200 dark:border-gray-700 pt-6">
-            <h3 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3 flex justify-between items-center">
-              Google Drive
-              {accessToken && (
-                <div className="flex gap-2">
-                  <button onClick={handleDriveSync} className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300" title="Refresh Drive">
-                    <RefreshCw className={`w-4 h-4 ${driveLoading ? 'animate-spin' : ''}`} />
-                  </button>
-                  <button onClick={logout} className="text-red-500 hover:text-red-700" title="Disconnect Drive">
-                    <LogOut className="w-4 h-4" />
-                  </button>
-                </div>
-              )}
-            </h3>
-            
-            {!accessToken ? (
-              <button onClick={() => login()} className="w-full flex items-center justify-center gap-2 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 px-4 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-600">
-                <LogIn className="w-4 h-4" /> Connect Drive
-              </button>
-            ) : (
-              <div className="space-y-4">
-                <button 
-                  onClick={syncAllToDrive} 
-                  disabled={isSyncing}
-                  className="w-full flex items-center justify-center gap-2 bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 px-4 py-2 rounded-lg hover:bg-indigo-100 dark:hover:bg-indigo-900/50 disabled:opacity-50"
-                >
-                  {isSyncing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} 
-                  {isSyncing ? 'Syncing...' : 'Sync All to Drive'}
-                </button>
-                
-                <ul className="space-y-2">
-                  {driveFiles.map(file => (
-                    <li key={file.id} className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg border border-transparent hover:border-gray-200 dark:hover:border-gray-600 group">
-                      <span className="text-sm truncate flex-1 dark:text-gray-200" title={file.name}>{file.name}</span>
-                      <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => deleteFromDrive(file)} className="text-red-500 hover:text-red-700 p-1" title="Delete from Drive">
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                        <button onClick={() => downloadFromDrive(file)} className="text-indigo-600 hover:text-indigo-800 dark:text-indigo-400 dark:hover:text-indigo-300 p-1" title="Download">
-                          <Download className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                  {driveFiles.length === 0 && !driveLoading && (
-                    <p className="text-sm text-gray-500 dark:text-gray-400">No files found in "IF Games" folder.</p>
-                  )}
-                </ul>
-              </div>
-            )}
-          </div>
-
-          <div className="mt-8 border-t border-gray-200 dark:border-gray-700 pt-6 pb-8">
+          <div className="space-y-6">
+            <div>
               <p className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-4">AI Settings</p>
               <div className="space-y-4">
                 <div>
@@ -636,6 +578,7 @@ export default function App() {
             </div>
           </div>
         </div>
+      </div>
 
       {/* Main Content */}
       <div 
@@ -645,10 +588,9 @@ export default function App() {
         <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-4 mb-4">
           <div className="flex items-center gap-3 w-full sm:w-auto min-w-0">
             <button onClick={() => {
-              if (!showSidebar) refreshLocalGames();
               setShowSidebar(!showSidebar);
             }} className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-700 dark:text-gray-300 shrink-0">
-              <Folder className="w-6 h-6" />
+              <Settings className="w-6 h-6" />
             </button>
             <h1 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-white truncate">
               {gameName ? gameName : 'Interactive Fiction Player'}
@@ -656,7 +598,21 @@ export default function App() {
           </div>
           <div className="flex items-center gap-2 w-full sm:w-auto overflow-x-auto pb-1 sm:pb-0 no-scrollbar shrink-0">
             <button 
-              onClick={() => window.location.reload()}
+              onClick={() => fileInputRef.current?.click()}
+              className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-indigo-600 dark:text-indigo-400 shrink-0"
+              title="Upload Game File"
+            >
+              <Upload className="w-5 h-5" />
+            </button>
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              onChange={handleFileUpload} 
+              className="hidden" 
+              accept=".z3,.z5,.z8,.ulx,.gblorb"
+            />
+            <button 
+              onClick={() => window.location.href = window.location.origin}
               className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-700 dark:text-gray-300 shrink-0"
               title="Refresh App"
             >
@@ -685,59 +641,131 @@ export default function App() {
               {autoSuggest ? <ToggleRight className="w-5 h-5" /> : <ToggleLeft className="w-5 h-5" />}
               <span className="hidden sm:inline">Auto</span>
             </button>
-            <button 
-              onClick={handleSuggest}
-              disabled={aiLoading || !gameData || (aiMode === 'hint' && !hintQuestion.trim())}
-              className="flex items-center gap-2 bg-indigo-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 shadow-sm shrink-0"
-            >
-              {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              <span className="hidden sm:inline">{aiMode === 'command' ? 'Suggest' : 'Ask'}</span>
-            </button>
+
+            {gameData && (
+              <div className="flex items-center gap-2">
+                {showHintInput ? (
+                  <div className="flex items-center gap-2 bg-gray-100 dark:bg-gray-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
+                    <input
+                      type="text"
+                      placeholder="Ask a hint..."
+                      value={hintQuestion}
+                      onChange={(e) => setHintQuestion(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && hintQuestion.trim()) {
+                          setAiMode('hint');
+                          handleSuggest();
+                        }
+                        if (e.key === 'Escape') {
+                          setShowHintInput(false);
+                          setAiMode('command');
+                        }
+                      }}
+                      className="w-32 sm:w-48 bg-transparent border-none px-2 py-1 text-xs text-gray-900 dark:text-gray-100 outline-none"
+                      autoFocus
+                    />
+                    <button 
+                      onClick={() => {
+                        if (hintQuestion.trim()) {
+                          setAiMode('hint');
+                          handleSuggest();
+                        } else {
+                          setShowHintInput(false);
+                          setAiMode('command');
+                        }
+                      }}
+                      className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-indigo-600 dark:text-indigo-400"
+                    >
+                      <Sparkles className="w-4 h-4" />
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setShowHintInput(false);
+                        setAiMode('command');
+                      }}
+                      className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-gray-500"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ) : (
+                  <button 
+                    onClick={() => setShowHintInput(true)}
+                    className="flex items-center gap-2 hover:bg-gray-200 dark:hover:bg-gray-700 px-3 py-2 rounded-lg text-gray-700 dark:text-gray-300 shrink-0"
+                    title="Ask for a Hint"
+                  >
+                    <Sparkles className="w-5 h-5" />
+                    <span className="hidden sm:inline">Hint</span>
+                  </button>
+                )}
+                <button 
+                  onClick={() => {
+                    setAiMode('command');
+                    handleSuggest();
+                  }}
+                  disabled={aiLoading || !gameData}
+                  className="flex items-center gap-2 bg-indigo-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 shadow-sm shrink-0"
+                >
+                  {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  <span className="hidden sm:inline">Suggest</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
         
-        {/* AI Mode Toggle & Hint Input */}
-        {gameData && (
-          <div className="mb-4 flex flex-col sm:flex-row gap-3 items-center bg-white dark:bg-gray-800 p-3 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm">
-            <div className="flex bg-gray-100 dark:bg-gray-900 p-1 rounded-lg shrink-0">
-              <button
-                onClick={() => setAiMode('command')}
-                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${aiMode === 'command' ? 'bg-white dark:bg-gray-700 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
-              >
-                Command Mode
-              </button>
-              <button
-                onClick={() => setAiMode('hint')}
-                className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${aiMode === 'hint' ? 'bg-white dark:bg-gray-700 text-indigo-600 dark:text-indigo-400 shadow-sm' : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200'}`}
-              >
-                Hint Mode
-              </button>
-            </div>
-            {aiMode === 'hint' && (
-              <input
-                type="text"
-                placeholder="Ask a question about the game..."
-                value={hintQuestion}
-                onChange={(e) => setHintQuestion(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && hintQuestion.trim()) {
-                    handleSuggest();
-                  }
-                }}
-                className="flex-1 w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-900 dark:text-gray-100 outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-            )}
-          </div>
-        )}
-
+        {/* Main Content Area */}
         <div className="flex-1 border border-gray-300 dark:border-gray-700 rounded-xl p-4 overflow-y-auto font-mono whitespace-pre-wrap bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 shadow-sm flex flex-col min-h-0 relative">
           {!gameData ? (
             <div className="flex-1 flex flex-col items-center justify-center text-gray-500 dark:text-gray-400">
-              <Folder className="w-12 h-12 mb-4 text-gray-300 dark:text-gray-600" />
-              <p>Open the library to load a game.</p>
+              <Upload className="w-12 h-12 mb-4 text-gray-300 dark:text-gray-600" />
+              <p className="mb-4 text-center px-4 text-sm sm:text-base">Load a game file to start playing.</p>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="inline-flex items-center gap-2 px-6 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-xl transition-colors shadow-sm"
+              >
+                <Upload size={20} />
+                Upload Game File
+              </button>
             </div>
           ) : (
             <>
+              {gameStatus === 'loading' && (
+                <div className="absolute inset-0 z-20 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm flex flex-col items-center justify-center text-indigo-600 dark:text-indigo-400">
+                  <Loader2 className="w-10 h-10 animate-spin mb-2" />
+                  <p className="font-medium">Initializing Game VM...</p>
+                </div>
+              )}
+              
+              {gameStatus === 'error' && (
+                <div className="absolute inset-0 z-30 bg-red-50/95 dark:bg-red-900/20 backdrop-blur-sm flex flex-col items-center justify-center text-red-600 dark:text-red-400 p-6 text-center">
+                  <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-red-200 dark:border-red-800 max-w-md">
+                    <p className="font-bold text-lg mb-2">Game Error</p>
+                    <p className="text-sm mb-4 font-mono break-all">{lastError || 'An unknown error occurred in the VM.'}</p>
+                    <button
+                      onClick={() => window.location.reload()}
+                      className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors font-sans"
+                    >
+                      Restart App
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {gameStatus === 'ended' && (
+                <div className="absolute inset-0 z-20 bg-gray-100/60 dark:bg-gray-900/60 backdrop-blur-[2px] flex flex-col items-center justify-center">
+                  <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 text-center">
+                    <p className="font-bold text-lg mb-4 text-gray-900 dark:text-gray-100">Game Session Ended</p>
+                    <button
+                      onClick={() => window.location.reload()}
+                      className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors"
+                    >
+                      Restart Game
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {windows.map(win => (
                 <div key={win.id} className="mb-4">
                   {windowBuffers[win.id]?.map((line: any, i: number) => (
@@ -789,8 +817,8 @@ export default function App() {
           </div>
         )}
 
-        {gameData && inputs.length > 0 && inputs[0].type === 'line' && !isReplaying && (
-          <div className="flex items-center mt-2 mb-4 p-3 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl shadow-sm shrink-0">
+        {gameData && !filePrompt && (
+          <div className={`flex items-center mt-2 mb-4 p-3 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl shadow-sm shrink-0 ${inputs.length === 0 ? 'opacity-70' : ''}`}>
             <span className="mr-2 text-blue-600 dark:text-blue-400 font-bold text-lg">&gt;</span>
             <input
               type="text"
@@ -812,7 +840,15 @@ export default function App() {
                 }, 300);
               }}
               autoFocus
-              placeholder="Enter command..."
+              placeholder={
+                gameStatus === 'loading' ? "Initializing..." :
+                gameStatus === 'ended' ? "Game ended." :
+                gameStatus === 'error' ? "Error occurred." :
+                inputs.length === 0 ? "Waiting for game..." : 
+                inputs[0].type === 'char' ? "Press any key..." : 
+                "Enter command..."
+              }
+              disabled={gameStatus !== 'playing' || inputs.length === 0}
             />
             <datalist id="ai-suggestions">
               {suggestions.map((sug, i) => (
@@ -847,7 +883,7 @@ export default function App() {
           </div>
         )}
 
-        {gameData && inputs.length > 0 && inputs[0].type === 'char' && !isReplaying && (
+        {gameData && inputs.length > 0 && inputs[0].type === 'char' && (
           <div className="flex items-center mt-2 mb-4 p-3 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl shadow-sm shrink-0">
             <button
               onClick={() => submitCommand('return')}
@@ -863,47 +899,75 @@ export default function App() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-xl max-w-md w-full mx-4">
             <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-4">
-              {filePrompt.filetype === 'save' ? 'Save Game' : 'Enter filename'}
+              {filePrompt.filemode === 'read' ? 'Restore Game' : 'Save Game'}
             </h3>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-              Please enter a file name (without an extension):
-            </p>
-            <input
-              type="text"
-              className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 mb-4 bg-transparent text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-indigo-500"
-              value={filePromptInput}
-              onChange={(e) => setFilePromptInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  submitFilePrompt(filePromptInput);
-                  setFilePromptInput('');
-                } else if (e.key === 'Escape') {
-                  submitFilePrompt(null);
-                  setFilePromptInput('');
-                }
-              }}
-              autoFocus
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => {
-                  submitFilePrompt(null);
-                  setFilePromptInput('');
-                }}
-                className="px-4 py-2 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  submitFilePrompt(filePromptInput);
-                  setFilePromptInput('');
-                }}
-                className="px-4 py-2 bg-indigo-600 text-white hover:bg-indigo-700 rounded-lg"
-              >
-                Save
-              </button>
-            </div>
+            
+            {filePrompt.filemode === 'read' ? (
+              <>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                  Waiting for file selection... (If the file chooser doesn't open automatically, please click below)
+                </p>
+                <input
+                  type="file"
+                  ref={saveFileInputRef}
+                  onChange={handleSaveFileUpload}
+                  className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 mb-4 bg-transparent text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => {
+                      submitFilePrompt(null);
+                      if (saveFileInputRef.current) saveFileInputRef.current.value = '';
+                    }}
+                    className="px-4 py-2 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                  Please enter a file name (without an extension):
+                </p>
+                <input
+                  type="text"
+                  className="w-full border border-gray-300 dark:border-gray-600 rounded-lg px-3 py-2 mb-4 bg-transparent text-gray-900 dark:text-white outline-none focus:ring-2 focus:ring-indigo-500"
+                  value={filePromptInput}
+                  onChange={(e) => setFilePromptInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      submitFilePrompt(filePromptInput);
+                      setFilePromptInput('');
+                    } else if (e.key === 'Escape') {
+                      submitFilePrompt(null);
+                      setFilePromptInput('');
+                    }
+                  }}
+                  autoFocus
+                />
+                <div className="flex justify-end gap-2">
+                  <button
+                    onClick={() => {
+                      submitFilePrompt(null);
+                      setFilePromptInput('');
+                    }}
+                    className="px-4 py-2 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      submitFilePrompt(filePromptInput);
+                      setFilePromptInput('');
+                    }}
+                    className="px-4 py-2 bg-indigo-600 text-white hover:bg-indigo-700 rounded-lg"
+                  >
+                    Save
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
