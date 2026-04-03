@@ -10,7 +10,7 @@ import gitWasm from 'emglken/build/git.wasm?url';
 import { MyDialog, pendingReads } from './MyDialog';
 import { useGlkOte } from './useGlkOte';
 import { useAI } from './useAI';
-import { Loader2, Sparkles, Settings, Play, RefreshCw, RotateCcw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2, ArrowUp, ArrowDown, Unlock, ExternalLink } from 'lucide-react';
+import { Loader2, Sparkles, Settings, Play, RefreshCw, RotateCcw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2, ArrowUp, ArrowDown, Unlock, ExternalLink, Lightbulb, Wand2 } from 'lucide-react';
 import localforage from 'localforage';
 import { extractStrings, findRelevantStrings } from './services/stringExtractor';
 
@@ -35,10 +35,6 @@ export default function App() {
   const [history, setHistory] = useState<string[]>([]);
   const [currentOutput, setCurrentOutput] = useState<string>('');
   const [historyIndex, setHistoryIndex] = useState(-1);
-  
-  const [sessionCommands, setSessionCommands] = useState<any[]>([]);
-  const [isReplaying, setIsReplaying] = useState(false);
-  const [replayIndex, setReplayIndex] = useState(0);
   
   const [gameStatus, setGameStatus] = useState<'idle' | 'loading' | 'playing' | 'ended' | 'error'>('idle');
   const isIframe = window.self !== window.top;
@@ -91,7 +87,12 @@ export default function App() {
     }
   }, [directoryHandle]);
 
+  const initDefaultGameRef = useRef(false);
+
   useEffect(() => {
+    if (initDefaultGameRef.current) return;
+    initDefaultGameRef.current = true;
+
     const initDefaultGame = async () => {
       // Try to load the last game played
       const lastGameName = await localforage.getItem<string>('lastGameName');
@@ -125,18 +126,6 @@ export default function App() {
     // Persist as last game played
     await localforage.setItem('lastGameName', name);
     await localforage.setItem('lastGameData', data);
-    
-    // Load session commands
-    const savedCommands = await localforage.getItem<any[]>(`sessionCommands_${name}`);
-    if (savedCommands && savedCommands.length > 0) {
-      setSessionCommands(savedCommands);
-      setReplayIndex(0);
-      setIsReplaying(true);
-    } else {
-      setSessionCommands([]);
-      setReplayIndex(0);
-      setIsReplaying(false);
-    }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -242,45 +231,12 @@ export default function App() {
         console.log('WASM factory type:', typeof factory, 'isGit:', isGit);
         console.log('WASM URL:', wasm);
         
-        // Load WASM binary manually for better reliability with timeout and cache busting
-        let wasmBinary: ArrayBuffer | undefined;
-        try {
-          console.log('Fetching WASM binary manually from:', wasm);
-          
-          const fetchWithTimeout = async (url: string, timeout = 10000) => {
-            const controller = new AbortController();
-            const id = setTimeout(() => controller.abort(), timeout);
-            try {
-              const response = await fetch(`${url}${url.includes('?') ? '&' : '?'}cb=${Date.now()}`, { 
-                signal: controller.signal 
-              });
-              clearTimeout(id);
-              return response;
-            } catch (e) {
-              clearTimeout(id);
-              throw e;
-            }
-          };
-
-          const wasmResponse = await fetchWithTimeout(wasm);
-          console.log('WASM fetch status:', wasmResponse.status, wasmResponse.statusText);
-          if (!wasmResponse.ok) {
-            throw new Error(`Failed to fetch WASM binary: ${wasmResponse.status} ${wasmResponse.statusText}`);
-          }
-          wasmBinary = await wasmResponse.arrayBuffer();
-          console.log('WASM binary loaded, size:', wasmBinary.byteLength);
-        } catch (fetchErr: any) {
-          console.error('Error loading WASM binary manually (falling back to internal fetch):', fetchErr);
-          // Fallback to locateFile if manual fetch fails
-        }
-
         if (cancelled) return;
 
         console.log('Loading WASM factory (awaiting factory function)...');
         
         // Add a timeout to the factory call
         const factoryPromise = factory({
-          wasmBinary,
           locateFile: (path: string) => {
             console.log('locateFile called for path:', path, 'Returning:', wasm);
             return wasm;
@@ -384,17 +340,12 @@ export default function App() {
     }
   }, [windowBuffers, windows]);
 
-  const handleFilePromptSubmit = (filename: string | null) => {
-    if (!isReplaying) {
-      const newCommands = [...sessionCommands, { type: 'fileref_prompt', value: filename }];
-      setSessionCommands(newCommands);
-      localforage.setItem(`sessionCommands_${gameName}`, newCommands);
-    }
+  const handleFilePromptSubmit = async (filename: string | null) => {
     submitFilePrompt(filename);
   };
 
   useEffect(() => {
-    if (filePrompt && !isReplaying) {
+    if (filePrompt) {
       if (filePrompt.filemode === 'write' || filePrompt.filetype === 'save') {
         const date = new Date();
         const timestamp = date.toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -417,47 +368,7 @@ export default function App() {
         }, 100);
       }
     }
-  }, [filePrompt, gameName, isReplaying]);
-
-  // Replay Engine
-  useEffect(() => {
-    if (!isReplaying) return;
-    
-    if (replayIndex >= sessionCommands.length) {
-      setIsReplaying(false);
-      return;
-    }
-
-    const nextCmd = sessionCommands[replayIndex];
-
-    if (filePrompt) {
-      if (nextCmd.type === 'fileref_prompt') {
-        console.log('Replaying file prompt:', nextCmd.value);
-        submitFilePrompt(nextCmd.value);
-        setReplayIndex(replayIndex + 1);
-      } else {
-        console.warn('Expected fileref_prompt in replay queue, but got:', nextCmd);
-        setIsReplaying(false);
-      }
-      return;
-    }
-
-    if (inputs.length > 0) {
-      const inputReq = inputs[0];
-      if (nextCmd.type === inputReq.type) {
-        console.log('Replaying input:', nextCmd);
-        sendEvent({
-          type: nextCmd.type,
-          window: inputReq.id,
-          value: nextCmd.value
-        });
-        setReplayIndex(replayIndex + 1);
-      } else {
-        console.warn('Input type mismatch during replay. Expected:', nextCmd.type, 'Got:', inputReq.type);
-        setIsReplaying(false);
-      }
-    }
-  }, [isReplaying, replayIndex, sessionCommands, inputs, filePrompt, sendEvent, submitFilePrompt]);
+  }, [filePrompt, gameName]);
 
   const handleInput = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && inputs.length > 0) {
@@ -502,12 +413,6 @@ export default function App() {
       const newHistory = [...history, cmd];
       setHistory(newHistory);
       
-      if (!isReplaying) {
-        const newCommands = [...sessionCommands, { type: 'line', value: cmd }];
-        setSessionCommands(newCommands);
-        localforage.setItem(`sessionCommands_${gameName}`, newCommands);
-      }
-      
       setInputValue('');
       if (!autoSuggest) {
         setSuggestions([]);
@@ -520,12 +425,6 @@ export default function App() {
         window: inputReq.id,
         value: charValue
       });
-      
-      if (!isReplaying) {
-        const newCommands = [...sessionCommands, { type: 'char', value: charValue }];
-        setSessionCommands(newCommands);
-        localforage.setItem(`sessionCommands_${gameName}`, newCommands);
-      }
       
       setInputValue('');
     }
@@ -916,7 +815,7 @@ export default function App() {
                       }}
                       className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-indigo-600 dark:text-indigo-400"
                     >
-                      <Sparkles className="w-4 h-4" />
+                      <Lightbulb className="w-4 h-4" />
                     </button>
                     <button 
                       onClick={() => {
@@ -934,7 +833,7 @@ export default function App() {
                     className="flex items-center gap-2 hover:bg-gray-200 dark:hover:bg-gray-700 px-3 py-2 rounded-lg text-gray-700 dark:text-gray-300 shrink-0"
                     title="Ask for a Hint"
                   >
-                    <Sparkles className="w-5 h-5" />
+                    <Lightbulb className="w-5 h-5" />
                     <span className="hidden sm:inline">Hint</span>
                   </button>
                 )}
@@ -946,7 +845,7 @@ export default function App() {
                   disabled={aiLoading || !gameData}
                   className="flex items-center gap-2 bg-indigo-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 shadow-sm shrink-0"
                 >
-                  {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
                   <span className="hidden sm:inline">Suggest</span>
                 </button>
               </div>
@@ -970,39 +869,28 @@ export default function App() {
             </div>
           ) : (
             <>
-              {gameStatus === 'loading' && (
-                <div className="absolute inset-0 z-20 bg-white/80 dark:bg-gray-800/80 backdrop-blur-sm flex flex-col items-center justify-center text-indigo-600 dark:text-indigo-400">
-                  <Loader2 className="w-10 h-10 animate-spin mb-2" />
-                  <p className="font-medium">Initializing Game VM...</p>
-                </div>
-              )}
-              
               {gameStatus === 'error' && (
-                <div className="absolute inset-0 z-30 bg-red-50/95 dark:bg-red-900/20 backdrop-blur-sm flex flex-col items-center justify-center text-red-600 dark:text-red-400 p-6 text-center">
-                  <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-red-200 dark:border-red-800 max-w-md">
-                    <p className="font-bold text-lg mb-2">Game Error</p>
-                    <p className="text-sm mb-4 font-mono break-all">{lastError || 'An unknown error occurred in the VM.'}</p>
-                    <button
-                      onClick={() => window.location.reload()}
-                      className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors font-sans"
-                    >
-                      Restart App
-                    </button>
-                  </div>
+                <div className="mb-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-4 rounded-xl text-red-600 dark:text-red-400">
+                  <p className="font-bold mb-1">Game Error</p>
+                  <p className="text-sm font-mono break-all">{lastError || 'An unknown error occurred in the VM.'}</p>
+                  <button
+                    onClick={() => window.location.reload()}
+                    className="mt-3 px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors font-sans text-sm"
+                  >
+                    Restart App
+                  </button>
                 </div>
               )}
 
               {gameStatus === 'ended' && (
-                <div className="absolute inset-0 z-20 bg-gray-100/60 dark:bg-gray-900/60 backdrop-blur-[2px] flex flex-col items-center justify-center">
-                  <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 text-center">
-                    <p className="font-bold text-lg mb-4 text-gray-900 dark:text-gray-100">Game Session Ended</p>
-                    <button
-                      onClick={() => window.location.reload()}
-                      className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors"
-                    >
-                      Restart Game
-                    </button>
-                  </div>
+                <div className="mb-4 bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-700 p-4 rounded-xl text-center">
+                  <p className="font-bold text-lg mb-2 text-gray-900 dark:text-gray-100">Game Session Ended</p>
+                  <button
+                    onClick={() => window.location.reload()}
+                    className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition-colors text-sm"
+                  >
+                    Restart Game
+                  </button>
                 </div>
               )}
 
@@ -1041,7 +929,7 @@ export default function App() {
                 >
                   ✕
                 </button>
-                <div className="font-bold mb-1 flex items-center gap-2"><Sparkles className="w-4 h-4"/> Hint</div>
+                <div className="font-bold mb-1 flex items-center gap-2"><Lightbulb className="w-4 h-4"/> Hint</div>
                 <div className="whitespace-pre-wrap">{hintAnswer}</div>
               </div>
             ) : (
@@ -1074,7 +962,7 @@ export default function App() {
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleInput}
-              disabled={isReplaying || gameStatus !== 'playing' || inputs.length === 0}
+              disabled={gameStatus !== 'playing' || inputs.length === 0}
               onFocus={() => {
                 setTimeout(() => {
                   bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1082,7 +970,6 @@ export default function App() {
               }}
               autoFocus
               placeholder={
-                isReplaying ? "Restoring session..." :
                 gameStatus === 'loading' ? "Initializing..." :
                 gameStatus === 'ended' ? "Game ended." :
                 gameStatus === 'error' ? "Error occurred." :
@@ -1136,7 +1023,7 @@ export default function App() {
         )}
       </div>
       {/* File Prompt Modal */}
-      {filePrompt && !isReplaying && (
+      {filePrompt && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-xl max-w-md w-full mx-4">
             <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-4">
@@ -1213,17 +1100,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Replay Overlay */}
-      {isReplaying && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-2xl flex flex-col items-center gap-4">
-            <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
-            <p className="text-gray-900 dark:text-white font-medium">
-              Restoring session... ({replayIndex}/{sessionCommands.length})
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

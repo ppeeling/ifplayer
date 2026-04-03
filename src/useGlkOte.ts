@@ -13,6 +13,7 @@ export function useGlkOte() {
     if (acceptFuncRef.current) {
       console.log('Sending event:', event);
       acceptFuncRef.current({ ...event, gen: genRef.current });
+      setInputs([]); // Clear inputs after sending event
     }
   }, []);
 
