@@ -36,6 +36,10 @@ export default function App() {
   const [currentOutput, setCurrentOutput] = useState<string>('');
   const [historyIndex, setHistoryIndex] = useState(-1);
   
+  const [sessionCommands, setSessionCommands] = useState<any[]>([]);
+  const [isReplaying, setIsReplaying] = useState(false);
+  const [replayIndex, setReplayIndex] = useState(0);
+  
   const [gameStatus, setGameStatus] = useState<'idle' | 'loading' | 'playing' | 'ended' | 'error'>('idle');
   const isIframe = window.self !== window.top;
   
@@ -104,24 +108,6 @@ export default function App() {
         loadGameData(lastGameName, lastGameData);
         return;
       }
-
-      // Fallback to minizork.z3
-      const exists = await localforage.getItem<Uint8Array>('minizork.z3');
-      if (!exists) {
-        try {
-          const res = await fetch('/minizork.z3');
-          const buffer = await res.arrayBuffer();
-          const data = new Uint8Array(buffer);
-          await localforage.setItem('minizork.z3', data);
-          if (!gameName) {
-            loadGameData('minizork.z3', data);
-          }
-        } catch (err) {
-          console.error('Failed to load default game:', err);
-        }
-      } else if (!gameName) {
-        loadGameData('minizork.z3', exists);
-      }
     };
     initDefaultGame();
   }, []);
@@ -139,6 +125,18 @@ export default function App() {
     // Persist as last game played
     await localforage.setItem('lastGameName', name);
     await localforage.setItem('lastGameData', data);
+    
+    // Load session commands
+    const savedCommands = await localforage.getItem<any[]>(`sessionCommands_${name}`);
+    if (savedCommands && savedCommands.length > 0) {
+      setSessionCommands(savedCommands);
+      setReplayIndex(0);
+      setIsReplaying(true);
+    } else {
+      setSessionCommands([]);
+      setReplayIndex(0);
+      setIsReplaying(false);
+    }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -192,7 +190,7 @@ export default function App() {
   const handleSaveFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) {
-      submitFilePrompt(null);
+      handleFilePromptSubmit(null);
       return;
     }
 
@@ -201,7 +199,10 @@ export default function App() {
     
     // Store in memory for MyDialog to read
     pendingReads[file.name] = data;
-    submitFilePrompt(file.name);
+    // Also store in localforage so replay engine can find it after refresh
+    await localforage.setItem(file.name, data);
+    
+    handleFilePromptSubmit(file.name);
     
     // Reset file input
     if (saveFileInputRef.current) {
@@ -383,8 +384,17 @@ export default function App() {
     }
   }, [windowBuffers, windows]);
 
+  const handleFilePromptSubmit = (filename: string | null) => {
+    if (!isReplaying) {
+      const newCommands = [...sessionCommands, { type: 'fileref_prompt', value: filename }];
+      setSessionCommands(newCommands);
+      localforage.setItem(`sessionCommands_${gameName}`, newCommands);
+    }
+    submitFilePrompt(filename);
+  };
+
   useEffect(() => {
-    if (filePrompt) {
+    if (filePrompt && !isReplaying) {
       if (filePrompt.filemode === 'write' || filePrompt.filetype === 'save') {
         const date = new Date();
         const timestamp = date.toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -399,7 +409,7 @@ export default function App() {
         setTimeout(() => {
           if (saveFileInputRef.current) {
             const handleCancel = () => {
-              submitFilePrompt(null);
+              handleFilePromptSubmit(null);
             };
             saveFileInputRef.current.addEventListener('cancel', handleCancel, { once: true });
             saveFileInputRef.current.click();
@@ -407,7 +417,47 @@ export default function App() {
         }, 100);
       }
     }
-  }, [filePrompt, gameName]);
+  }, [filePrompt, gameName, isReplaying]);
+
+  // Replay Engine
+  useEffect(() => {
+    if (!isReplaying) return;
+    
+    if (replayIndex >= sessionCommands.length) {
+      setIsReplaying(false);
+      return;
+    }
+
+    const nextCmd = sessionCommands[replayIndex];
+
+    if (filePrompt) {
+      if (nextCmd.type === 'fileref_prompt') {
+        console.log('Replaying file prompt:', nextCmd.value);
+        submitFilePrompt(nextCmd.value);
+        setReplayIndex(replayIndex + 1);
+      } else {
+        console.warn('Expected fileref_prompt in replay queue, but got:', nextCmd);
+        setIsReplaying(false);
+      }
+      return;
+    }
+
+    if (inputs.length > 0) {
+      const inputReq = inputs[0];
+      if (nextCmd.type === inputReq.type) {
+        console.log('Replaying input:', nextCmd);
+        sendEvent({
+          type: nextCmd.type,
+          window: inputReq.id,
+          value: nextCmd.value
+        });
+        setReplayIndex(replayIndex + 1);
+      } else {
+        console.warn('Input type mismatch during replay. Expected:', nextCmd.type, 'Got:', inputReq.type);
+        setIsReplaying(false);
+      }
+    }
+  }, [isReplaying, replayIndex, sessionCommands, inputs, filePrompt, sendEvent, submitFilePrompt]);
 
   const handleInput = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && inputs.length > 0) {
@@ -452,17 +502,31 @@ export default function App() {
       const newHistory = [...history, cmd];
       setHistory(newHistory);
       
+      if (!isReplaying) {
+        const newCommands = [...sessionCommands, { type: 'line', value: cmd }];
+        setSessionCommands(newCommands);
+        localforage.setItem(`sessionCommands_${gameName}`, newCommands);
+      }
+      
       setInputValue('');
       if (!autoSuggest) {
         setSuggestions([]);
       }
     } else if (inputReq.type === 'char') {
       const char = cmd.length > 0 ? cmd[0] : 'return';
+      const charValue = char === ' ' ? 'space' : char;
       sendEvent({
         type: 'char',
         window: inputReq.id,
-        value: char === ' ' ? 'space' : char
+        value: charValue
       });
+      
+      if (!isReplaying) {
+        const newCommands = [...sessionCommands, { type: 'char', value: charValue }];
+        setSessionCommands(newCommands);
+        localforage.setItem(`sessionCommands_${gameName}`, newCommands);
+      }
+      
       setInputValue('');
     }
 
@@ -1006,10 +1070,11 @@ export default function App() {
               spellCheck="false"
               data-1p-ignore="true"
               data-lpignore="true"
-              className="flex-1 outline-none bg-transparent font-mono text-gray-900 dark:text-gray-100 text-lg w-full"
+              className="flex-1 outline-none bg-transparent font-mono text-gray-900 dark:text-gray-100 text-lg w-full disabled:opacity-50"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleInput}
+              disabled={isReplaying || gameStatus !== 'playing' || inputs.length === 0}
               onFocus={() => {
                 setTimeout(() => {
                   bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1017,6 +1082,7 @@ export default function App() {
               }}
               autoFocus
               placeholder={
+                isReplaying ? "Restoring session..." :
                 gameStatus === 'loading' ? "Initializing..." :
                 gameStatus === 'ended' ? "Game ended." :
                 gameStatus === 'error' ? "Error occurred." :
@@ -1024,7 +1090,6 @@ export default function App() {
                 inputs[0].type === 'char' ? "Press any key..." : 
                 "Enter command..."
               }
-              disabled={gameStatus !== 'playing' || inputs.length === 0}
             />
             <datalist id="ai-suggestions">
               {suggestions.map((sug, i) => (
@@ -1071,7 +1136,7 @@ export default function App() {
         )}
       </div>
       {/* File Prompt Modal */}
-      {filePrompt && (
+      {filePrompt && !isReplaying && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-xl max-w-md w-full mx-4">
             <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-4">
@@ -1092,7 +1157,7 @@ export default function App() {
                 <div className="flex justify-end gap-2">
                   <button
                     onClick={() => {
-                      submitFilePrompt(null);
+                      handleFilePromptSubmit(null);
                       if (saveFileInputRef.current) saveFileInputRef.current.value = '';
                     }}
                     className="px-4 py-2 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
@@ -1113,10 +1178,10 @@ export default function App() {
                   onChange={(e) => setFilePromptInput(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
-                      submitFilePrompt(filePromptInput);
+                      handleFilePromptSubmit(filePromptInput);
                       setFilePromptInput('');
                     } else if (e.key === 'Escape') {
-                      submitFilePrompt(null);
+                      handleFilePromptSubmit(null);
                       setFilePromptInput('');
                     }
                   }}
@@ -1125,7 +1190,7 @@ export default function App() {
                 <div className="flex justify-end gap-2">
                   <button
                     onClick={() => {
-                      submitFilePrompt(null);
+                      handleFilePromptSubmit(null);
                       setFilePromptInput('');
                     }}
                     className="px-4 py-2 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg"
@@ -1134,7 +1199,7 @@ export default function App() {
                   </button>
                   <button
                     onClick={() => {
-                      submitFilePrompt(filePromptInput);
+                      handleFilePromptSubmit(filePromptInput);
                       setFilePromptInput('');
                     }}
                     className="px-4 py-2 bg-indigo-600 text-white hover:bg-indigo-700 rounded-lg"
@@ -1144,6 +1209,18 @@ export default function App() {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Replay Overlay */}
+      {isReplaying && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-2xl flex flex-col items-center gap-4">
+            <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
+            <p className="text-gray-900 dark:text-white font-medium">
+              Restoring session... ({replayIndex}/{sessionCommands.length})
+            </p>
           </div>
         </div>
       )}

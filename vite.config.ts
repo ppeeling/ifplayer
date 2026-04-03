@@ -9,6 +9,7 @@ export default defineConfig(({mode}) => {
   console.log('GEMINI_API_KEY in process.env:', !!process.env.GEMINI_API_KEY);
   console.log('GEMINI_API_KEY in env:', !!env.GEMINI_API_KEY);
   return {
+    base: './',
     plugins: [
       react(),
       tailwindcss(),
@@ -80,6 +81,18 @@ export default defineConfig(({mode}) => {
         }
       })
     ],
+    build: {
+      rollupOptions: {
+        output: {
+          assetFileNames: (assetInfo) => {
+            if (assetInfo.name && assetInfo.name.endsWith('.wasm')) {
+              return 'assets/[name][extname]';
+            }
+            return 'assets/[name]-[hash][extname]';
+          },
+        },
+      },
+    },
     define: {
       'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY || process.env.GEMINI_API_KEY || ''),
     },
