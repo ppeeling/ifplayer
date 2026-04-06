@@ -12,23 +12,21 @@ import { useGlkOte } from './useGlkOte';
 import { useAI } from './useAI';
 import { Loader2, Sparkles, Settings, Play, RefreshCw, RotateCcw, Upload, Moon, Sun, ToggleLeft, ToggleRight, Trash2, ArrowUp, ArrowDown, Unlock, ExternalLink, Lightbulb, Wand2 } from 'lucide-react';
 import localforage from 'localforage';
-import { extractStrings, findRelevantStrings } from './services/stringExtractor';
 
 export default function App() {
   const { GlkOte, sendEvent, windows, windowBuffers, inputs, clearState, filePrompt, submitFilePrompt } = useGlkOte();
-  const { suggestions, hintAnswer, loading: aiLoading, error: aiError, getSuggestions, setSuggestions, setHintAnswer } = useAI();
+  const { suggestions, hintAnswer, loading: aiLoading, loadingMode: aiLoadingMode, error: aiError, getSuggestions, setSuggestions, setHintAnswer } = useAI();
   
   const [gameData, setGameData] = useState<Uint8Array | null>(null);
   const [gameName, setGameName] = useState<string>('');
   const [gameSessionId, setGameSessionId] = useState<number>(0);
-  const [gameStrings, setGameStrings] = useState<string[]>([]);
-  const [showHintInput, setShowHintInput] = useState(false);
-  const [aiMode, setAiMode] = useState<'command' | 'hint'>('command');
-  const [hintQuestion, setHintQuestion] = useState('');
+  const [walkthroughFile, setWalkthroughFile] = useState<{ name: string, base64: string } | null>(null);
+  const [isHintMode, setIsHintMode] = useState(false);
+  const walkthroughInputRef = useRef<HTMLInputElement>(null);
   const [aiSettings, setAiSettings] = useState({
     contextWindowSize: 10000,
     historyLength: 15,
-    relevantStringsCount: 20
+    suggestionCount: 7
   });
   const [inputValue, setInputValue] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -118,7 +116,6 @@ export default function App() {
     setGameSessionId(sessionId);
     setGameName(name);
     setGameData(new Uint8Array(data));
-    setGameStrings(extractStrings(data));
     setHistory([]);
     updateGameStatus('loading');
     setLastError(null);
@@ -139,6 +136,23 @@ export default function App() {
     // Reset file input
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
+    }
+  };
+
+  const handleWalkthroughUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const base64 = (event.target?.result as string).split(',')[1];
+      setWalkthroughFile({ name: file.name, base64 });
+    };
+    reader.readAsDataURL(file);
+
+    // Reset file input
+    if (walkthroughInputRef.current) {
+      walkthroughInputRef.current.value = '';
     }
   };
 
@@ -403,6 +417,13 @@ export default function App() {
     if (window.innerWidth < 768) {
       (document.activeElement as HTMLElement)?.blur();
     }
+
+    if (isHintMode) {
+      handleSuggest('hint', cmd);
+      setIsHintMode(false);
+      setInputValue('');
+      return;
+    }
     
     if (inputReq.type === 'line') {
       sendEvent({
@@ -446,12 +467,10 @@ export default function App() {
     if (autoSuggest && inputs.length > 0 && inputs[0].type === 'line' && currentOutput) {
       if (lastSuggestedTurn.current !== history.length) {
         lastSuggestedTurn.current = history.length;
-        const relevant = findRelevantStrings(gameStrings, currentOutput);
-        console.log(`Top ${aiSettings.relevantStringsCount} relevant strings:`, relevant.slice(0, aiSettings.relevantStringsCount));
-        getSuggestions('command', '', history, currentOutput, gameName, getGameType(), relevant, selectedModel, aiSettings);
+        getSuggestions('command', '', history, currentOutput, gameName, getGameType(), walkthroughFile?.base64 || null, selectedModel, aiSettings);
       }
     }
-  }, [inputs, currentOutput, autoSuggest, history.length, getSuggestions, selectedModel, gameName, gameStrings, aiSettings]);
+  }, [inputs, currentOutput, autoSuggest, history.length, getSuggestions, selectedModel, gameName, walkthroughFile, aiSettings]);
 
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
@@ -465,10 +484,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [inputs]);
 
-  const handleSuggest = () => {
-    const relevant = findRelevantStrings(gameStrings, currentOutput);
-    console.log(`Top ${aiSettings.relevantStringsCount} relevant strings:`, relevant.slice(0, aiSettings.relevantStringsCount));
-    getSuggestions(aiMode, hintQuestion, history, currentOutput, gameName, getGameType(), relevant, selectedModel, aiSettings);
+  const handleSuggest = (mode: 'command' | 'hint' = 'command', question: string = '') => {
+    getSuggestions(mode, question, history, currentOutput, gameName, getGameType(), walkthroughFile?.base64 || null, selectedModel, aiSettings);
   };
 
   const clearAppCache = async () => {
@@ -640,11 +657,11 @@ export default function App() {
                         />
                       </div>
                       <div>
-                        <label className="block text-[10px] text-gray-500 mb-1">Relevant Strings ({aiSettings.relevantStringsCount})</label>
+                        <label className="block text-[10px] text-gray-500 mb-1">Suggestion Count ({aiSettings.suggestionCount})</label>
                         <input 
-                          type="range" min="0" max="100" step="5"
-                          value={aiSettings.relevantStringsCount}
-                          onChange={(e) => setAiSettings({...aiSettings, relevantStringsCount: parseInt(e.target.value)})}
+                          type="range" min="1" max="15" step="1"
+                          value={aiSettings.suggestionCount}
+                          onChange={(e) => setAiSettings({...aiSettings, suggestionCount: parseInt(e.target.value)})}
                           className="w-full h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
                         />
                       </div>
@@ -750,6 +767,13 @@ export default function App() {
               className="hidden" 
               accept=".z3,.z5,.z8,.ulx,.gblorb"
             />
+            <input 
+              type="file" 
+              ref={walkthroughInputRef} 
+              onChange={handleWalkthroughUpload} 
+              className="hidden" 
+              accept="application/pdf"
+            />
             <button 
               onClick={() => window.location.reload()}
               className="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg text-gray-700 dark:text-gray-300 shrink-0"
@@ -769,9 +793,7 @@ export default function App() {
                 setAutoSuggest(!autoSuggest);
                 if (!autoSuggest && inputs.length > 0 && inputs[0].type === 'line' && currentOutput) {
                   lastSuggestedTurn.current = history.length;
-                  const relevant = findRelevantStrings(gameStrings, currentOutput);
-                  console.log(`Top ${aiSettings.relevantStringsCount} relevant strings:`, relevant.slice(0, aiSettings.relevantStringsCount));
-                  getSuggestions('command', '', history, currentOutput, gameName, getGameType(), relevant, selectedModel, aiSettings);
+                  getSuggestions('command', '', history, currentOutput, gameName, getGameType(), walkthroughFile?.base64 || null, selectedModel, aiSettings);
                 }
               }}
               className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg transition-colors shadow-sm shrink-0 ${autoSuggest ? 'bg-emerald-600 text-white hover:bg-emerald-700' : 'bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
@@ -783,69 +805,41 @@ export default function App() {
 
             {gameData && (
               <div className="flex items-center gap-2">
-                {showHintInput ? (
-                  <div className="flex items-center gap-2 bg-gray-100 dark:bg-gray-900 p-1 rounded-lg border border-gray-200 dark:border-gray-700">
-                    <input
-                      type="text"
-                      placeholder="Ask a hint..."
-                      value={hintQuestion}
-                      onChange={(e) => setHintQuestion(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && hintQuestion.trim()) {
-                          setAiMode('hint');
-                          handleSuggest();
-                        }
-                        if (e.key === 'Escape') {
-                          setShowHintInput(false);
-                          setAiMode('command');
-                        }
-                      }}
-                      className="w-32 sm:w-48 bg-transparent border-none px-2 py-1 text-xs text-gray-900 dark:text-gray-100 outline-none"
-                      autoFocus
-                    />
-                    <button 
-                      onClick={() => {
-                        if (hintQuestion.trim()) {
-                          setAiMode('hint');
-                          handleSuggest();
-                        } else {
-                          setShowHintInput(false);
-                          setAiMode('command');
-                        }
-                      }}
-                      className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-indigo-600 dark:text-indigo-400"
-                    >
-                      <Lightbulb className="w-4 h-4" />
-                    </button>
-                    <button 
-                      onClick={() => {
-                        setShowHintInput(false);
-                        setAiMode('command');
-                      }}
-                      className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-gray-500"
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ) : (
-                  <button 
-                    onClick={() => setShowHintInput(true)}
-                    className="flex items-center gap-2 hover:bg-gray-200 dark:hover:bg-gray-700 px-3 py-2 rounded-lg text-gray-700 dark:text-gray-300 shrink-0"
-                    title="Ask for a Hint"
+                <button 
+                  onClick={() => {
+                    if (!walkthroughFile) {
+                      walkthroughInputRef.current?.click();
+                    } else {
+                      setIsHintMode(!isHintMode);
+                      if (!isHintMode) {
+                        setTimeout(() => {
+                          const input = document.querySelector('input[name="if-command-input"]') as HTMLInputElement;
+                          input?.focus();
+                        }, 100);
+                      }
+                    }
+                  }}
+                  className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg transition-colors shadow-sm shrink-0 ${isHintMode ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'}`}
+                  title={walkthroughFile ? "Toggle Hint Mode" : "Load Walkthrough PDF"}
+                >
+                  {aiLoadingMode === 'hint' ? <Loader2 className="w-5 h-5 animate-spin" /> : <Lightbulb className="w-5 h-5" />}
+                  <span className="hidden sm:inline">Hint</span>
+                </button>
+                {walkthroughFile && (
+                  <button
+                    onClick={() => { setWalkthroughFile(null); setIsHintMode(false); }}
+                    className="p-2 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-lg border border-transparent hover:border-red-200 dark:hover:border-red-800"
+                    title="Clear Walkthrough"
                   >
-                    <Lightbulb className="w-5 h-5" />
-                    <span className="hidden sm:inline">Hint</span>
+                    <Trash2 className="w-4 h-4" />
                   </button>
                 )}
                 <button 
-                  onClick={() => {
-                    setAiMode('command');
-                    handleSuggest();
-                  }}
+                  onClick={() => handleSuggest('command')}
                   disabled={aiLoading || !gameData}
                   className="flex items-center gap-2 bg-indigo-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 shadow-sm shrink-0"
                 >
-                  {aiLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
+                  {aiLoadingMode === 'command' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
                   <span className="hidden sm:inline">Suggest</span>
                 </button>
               </div>
@@ -908,8 +902,8 @@ export default function App() {
           )}
         </div>
 
-        {(aiLoading || hintAnswer || aiError) && (
-          <div className={`mt-3 gap-2 overflow-x-auto pb-2 no-scrollbar shrink-0 min-h-[48px] items-center relative z-10 ${!hintAnswer && !aiError ? 'hidden sm:flex' : 'flex'}`}>
+        {(hintAnswer || aiError) && (
+          <div className={`mt-3 gap-2 overflow-x-auto pb-2 no-scrollbar shrink-0 min-h-[48px] items-center relative z-10 flex`}>
             {aiError ? (
               <div className="text-xs text-red-500 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 px-3 py-2 rounded-lg flex items-center gap-2">
                 <span className="font-bold shrink-0">AI Error:</span>
@@ -932,16 +926,7 @@ export default function App() {
                 <div className="font-bold mb-1 flex items-center gap-2"><Lightbulb className="w-4 h-4"/> Hint</div>
                 <div className="whitespace-pre-wrap">{hintAnswer}</div>
               </div>
-            ) : (
-              <>
-                {aiLoading && (
-                  <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 italic px-2 shrink-0">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    Generating suggestions...
-                  </div>
-                )}
-              </>
-            )}
+            ) : null}
           </div>
         )}
 
@@ -970,6 +955,7 @@ export default function App() {
               }}
               autoFocus
               placeholder={
+                isHintMode ? "Ask a hint..." :
                 gameStatus === 'loading' ? "Initializing..." :
                 gameStatus === 'ended' ? "Game ended." :
                 gameStatus === 'error' ? "Error occurred." :

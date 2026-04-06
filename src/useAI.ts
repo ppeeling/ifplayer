@@ -5,6 +5,7 @@ export function useAI() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [hintAnswer, setHintAnswer] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingMode, setLoadingMode] = useState<'command' | 'hint' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const getSuggestions = useCallback(async (
@@ -14,12 +15,13 @@ export function useAI() {
     currentOutput: string, 
     gameName: string = '', 
     gameType: string = '', 
-    relevantStrings: string[] = [], 
+    walkthroughBase64: string | null = null, 
     model: string = 'gemini-3-flash-preview',
-    settings: { contextWindowSize: number, historyLength: number, relevantStringsCount: number } = { contextWindowSize: 10000, historyLength: 15, relevantStringsCount: 20 }
+    settings: { contextWindowSize: number, historyLength: number, suggestionCount: number } = { contextWindowSize: 10000, historyLength: 15, suggestionCount: 7 }
   ) => {
     if (!currentOutput.trim()) return;
     setLoading(true);
+    setLoadingMode(mode);
     setError(null);
     if (mode === 'hint') setHintAnswer(null);
     try {
@@ -49,7 +51,7 @@ export function useAI() {
 
       if (mode === 'command') {
         prompt = `You are an expert AI assistant playing an interactive fiction game.
-Your goal is to provide 7 helpful, concise command suggestions for the player.
+Your goal is to provide ${settings.suggestionCount} helpful, concise command suggestions for the player.
 
 Game Info:
 - Name: ${gameName || 'Unknown'}
@@ -58,7 +60,6 @@ Game Info:
 Context:
 - Analyze the "Current output" for objects, room descriptions, exits, and narrative clues.
 - Review the "Recent history" to avoid repeating failed actions and to understand the current quest.
-- Use the "Relevant Game Strings" (extracted from the binary) to find potential commands, object names, or narrative hints.
 - Suggestions should be short (1-4 words) and relevant to the current situation.
 
 Recent history (last ${settings.historyLength} commands):
@@ -67,10 +68,7 @@ ${history.slice(-settings.historyLength).join('\n')}
 Current output (last ${settings.contextWindowSize} characters):
 ${truncatedOutput}
 
-Relevant Game Strings (Hints):
-${relevantStrings.length > 0 ? relevantStrings.slice(0, settings.relevantStringsCount).join('\n') : 'None available.'}
-
-Return ONLY a JSON array of 7 strings.`;
+Return ONLY a JSON array of ${settings.suggestionCount} strings.`;
 
         config = {
           responseMimeType: 'application/json',
@@ -94,7 +92,7 @@ User Question:
 Context:
 - Analyze the "Current output" for objects, room descriptions, exits, and narrative clues.
 - Review the "Recent history" to understand what the player has tried.
-- Use the "Relevant Game Strings" (extracted from the binary) to find potential clues, hidden objects, or narrative hints that might answer the question.
+- Use the provided walkthrough PDF document to find clues, hidden objects, or narrative hints that might answer the question.
 - Provide a helpful, concise answer. Do not give away the entire solution unless explicitly asked, but be helpful.
 
 Recent history (last ${settings.historyLength} commands):
@@ -103,15 +101,23 @@ ${history.slice(-settings.historyLength).join('\n')}
 Current output (last ${settings.contextWindowSize} characters):
 ${truncatedOutput}
 
-Relevant Game Strings (Hints):
-${relevantStrings.length > 0 ? relevantStrings.slice(0, settings.relevantStringsCount).join('\n') : 'None available.'}
-
 Return a helpful, concise answer in plain text.`;
       }
 
+      const contents: any[] = [];
+      if (walkthroughBase64 && mode === 'hint') {
+        contents.push({
+          inlineData: {
+            data: walkthroughBase64,
+            mimeType: 'application/pdf'
+          }
+        });
+      }
+      contents.push(prompt);
+
       const response = await ai.models.generateContent({
         model: model,
-        contents: prompt,
+        contents: contents,
         config: config
       });
       
@@ -135,8 +141,9 @@ Return a helpful, concise answer in plain text.`;
       }
     } finally {
       setLoading(false);
+      setLoadingMode(null);
     }
   }, []);
 
-  return { suggestions, hintAnswer, loading, error, getSuggestions, setSuggestions, setHintAnswer };
+  return { suggestions, hintAnswer, loading, loadingMode, error, getSuggestions, setSuggestions, setHintAnswer };
 }
